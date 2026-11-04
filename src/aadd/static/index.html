@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AI aided design environment.</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/vendor/lucide.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><i data-lucide="git-pull-request-arrow"></i><span>AI aided design environment.</span></div>
+    <div class="header-actions">
+      <span id="connection" class="connection">接続確認中</span>
+      <button id="history-toggle" class="icon-button mobile-only" title="案件一覧" aria-label="案件一覧" aria-expanded="false"><i data-lucide="panel-left"></i></button>
+    </div>
+  </header>
+  <div class="app-layout">
+    <aside id="sidebar" class="sidebar" aria-label="案件一覧">
+      <div class="sidebar-heading"><h2>案件</h2><button id="new-project" class="icon-button" title="新規案件" aria-label="新規案件"><i data-lucide="plus"></i></button></div>
+      <div id="history" class="history"></div>
+      <div class="sidebar-footer"><span class="local-dot"></span>ローカル保存</div>
+    </aside>
+    <main>
+      <nav class="steps" aria-label="検討工程">
+        <button data-phase="request" aria-current="step"><span class="step-number">1</span>変更要求</button>
+        <span class="step-line"></span>
+        <button data-phase="changes"><span class="step-number">2</span>変更内容</button>
+        <span class="step-line"></span>
+        <button data-phase="results"><span class="step-number">3</span>修正案</button>
+      </nav>
+      <div id="notice" role="alert" class="notice" hidden></div>
+      <div class="workspace">
+        <section id="request-panel" aria-labelledby="request-heading">
+          <div class="section-heading"><div><span class="eyebrow">Change request</span><h1 id="request-heading">変更要求</h1></div><button id="delete-project" class="icon-button danger" title="案件を削除" aria-label="案件を削除" hidden><i data-lucide="trash-2"></i></button></div>
+          <form id="request-form">
+            <label for="request-text">変更内容</label>
+            <textarea id="request-text" name="request" rows="10" placeholder="変更したい振る舞いや仕様を入力" maxlength="120000"></textarea>
+            <div class="attachment-heading"><label for="files">添付資料</label><label class="button secondary attachment-button" for="files" id="attach-label"><i data-lucide="paperclip"></i>資料を添付</label></div>
+            <input id="files" type="file" multiple accept=".docx,.xlsx,.pptx,.pdf,.txt,.md" class="file-input">
+            <ul id="file-list" class="file-list"></ul>
+            <div id="attachment-warnings" class="warnings"></div>
+            <div class="form-footer"><span id="request-meta" class="muted"></span><button id="extract-button" type="submit" class="button primary"><i data-lucide="list-filter"></i><span>変更内容を抽出</span></button></div>
+          </form>
+        </section>
+        <section id="changes-panel" aria-labelledby="changes-heading" hidden>
+          <div class="section-heading"><div><span class="eyebrow">Change items</span><h1 id="changes-heading">変更内容</h1></div><span id="revision" class="metadata"></span></div>
+          <div id="extraction-status" class="empty-state" hidden></div>
+          <form id="changes-form">
+            <fieldset id="change-fields"><div id="change-list"></div></fieldset>
+            <div class="change-actions"><button id="add-change" type="button" class="button secondary"><i data-lucide="plus"></i>変更を追加</button><span id="dirty-state" class="muted" aria-live="polite"></span></div>
+            <div class="form-footer"><button id="save-changes" type="button" class="button secondary"><i data-lucide="save"></i>保存</button><button id="generate-button" type="submit" class="button primary"><i data-lucide="play"></i>確定して修正案を作成</button></div>
+          </form>
+        </section>
+        <section id="results-panel" aria-labelledby="results-heading" hidden>
+          <div class="section-heading"><div><span class="eyebrow">Proposals</span><h1 id="results-heading">修正案</h1></div><select id="run-select" aria-label="実行履歴"></select></div>
+          <div id="progress" class="progress" aria-live="polite" hidden></div>
+          <div id="run-issues" class="run-issues"></div>
+          <div id="result-empty" class="empty-state">修正案はまだありません。</div>
+          <div id="proposal-area" hidden>
+            <div class="proposal-heading"><label for="proposal-select">対象仕様書</label><select id="proposal-select"></select></div>
+            <p id="proposal-summary" class="proposal-summary"></p>
+            <div class="document-toolbar">
+              <div id="document-tabs" class="document-tabs" role="tablist" aria-label="文書表示">
+                <button id="tab-original" data-document="original" role="tab" aria-controls="document-content" aria-selected="false" tabindex="-1"><i data-lucide="file-text"></i>原文</button>
+                <button id="tab-modified" data-document="modified" role="tab" aria-controls="document-content" aria-selected="false" tabindex="-1"><i data-lucide="file-pen-line"></i>修正文</button>
+                <button id="tab-diff" data-document="diff" role="tab" aria-controls="document-content" aria-selected="true"><i data-lucide="git-compare-arrows"></i>差分</button>
+              </div>
+              <div class="download-actions"><a id="download-markdown" class="icon-button" title="修正文をダウンロード" aria-label="修正文をダウンロード"><i data-lucide="file-down"></i></a><a id="download-diff" class="icon-button" title="差分をダウンロード" aria-label="差分をダウンロード"><i data-lucide="download"></i></a></div>
+            </div>
+            <pre id="document-content" role="tabpanel" tabindex="0" aria-labelledby="tab-diff"></pre>
+          </div>
+          <div id="candidate-results" class="candidate-results"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <template id="change-template">
+    <article class="change-item">
+      <div class="change-item-heading"><span class="change-index"></span><label class="summary-label">変更概要<input data-field="summary" required maxlength="2000"></label><button type="button" class="icon-button remove-change" title="変更を削除" aria-label="変更を削除"><i data-lucide="trash-2"></i></button></div>
+      <div class="before-after"><label><span class="field-marker before-marker"></span>変更前<textarea data-field="before" rows="3" maxlength="12000" placeholder="未記載"></textarea></label><label><span class="field-marker after-marker"></span>変更後<textarea data-field="after" rows="3" maxlength="12000" placeholder="未記載"></textarea></label></div>
+      <details class="change-details"><summary>出典・不明点</summary><div class="before-after"><label>出典<textarea data-field="sources" rows="2"></textarea></label><label>不明点<textarea data-field="unknowns" rows="2"></textarea></label></div></details>
+    </article>
+  </template>
+</body>
+</html>

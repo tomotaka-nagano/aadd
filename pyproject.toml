@@ -1,0 +1,35 @@
+[project]
+name = "aadd"
+version = "0.1.0"
+description = "AI aided functional specification updates"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+	"exmgai",
+	"fastapi>=0.115",
+	"httpx>=0.28",
+	"openpyxl>=3.1",
+	"pydantic>=2.10",
+	"pypdf>=4",
+	"python-docx>=1.1",
+	"python-multipart>=0.0.20",
+	"python-pptx>=1.0",
+	"tiktoken>=0.12",
+	"typesafe-sdk>=0.7.5",
+	"uvicorn>=0.34",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["flake8>=7.3", "pytest>=8.3", "pytest-asyncio>=0.25"]
+
+[tool.uv.sources]
+exmgai = { path = "../exmgai", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

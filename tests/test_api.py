@@ -1,0 +1,103 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from fastapi.testclient import TestClient
+import pytest
+
+from aadd.config import Settings
+from aadd.main import create_app
+from aadd.models import Change, Project, Run
+from test_workflow import FakeAI, FakeKB
+
+
+def browser_app():
+    directory = TemporaryDirectory(prefix='aadd-browser-')
+    application = create_app(Settings(data_dir=Path(directory.name)), ai=FakeAI(), kb=FakeKB())
+    application.state.test_directory = directory
+    return application
+
+
+@pytest.fixture
+def client(tmp_path):
+    application = create_app(Settings(data_dir=tmp_path, ai_config=tmp_path / 'missing.toml'), ai=FakeAI(), kb=FakeKB())
+    with TestClient(application) as test_client:
+        yield test_client
+
+
+def test_health_without_settings(client):
+    assert client.get('/api/health').json() == {'status': 'ok', 'ai_configured': False}
+
+
+def test_static_application(client):
+    response = client.get('/')
+    assert response.status_code == 200
+    assert '変更要求' in response.text
+    assert '<title>AI aided design environment.</title>' in response.text
+    assert '<span>AI aided design environment.</span>' in response.text
+    assert 'brand-caption' not in response.text
+    assert client.get('/static/app.js').status_code == 200
+    assert client.get('/static/style.css').status_code == 200
+
+
+def test_create_edit_and_delete(client):
+    response = client.post('/api/projects', data={'request': '変更要求'}, files={'files': ('input.md', b'# spec')})
+    assert response.status_code == 201
+    project = response.json()
+    assert project['attachments'][0]['text'] == '# spec'
+    changes = {'revision': 0, 'changes': [{'id': 'change', 'summary': '変更', 'after': '新仕様'}]}
+    updated = client.put(f'/api/projects/{project["id"]}/changes', json=changes)
+    assert updated.json()['revision'] == 1
+    assert client.put(f'/api/projects/{project["id"]}/changes', json=changes).status_code == 409
+    assert client.get('/api/projects').json()[0]['id'] == project['id']
+    assert client.delete(f'/api/projects/{project["id"]}').status_code == 204
+    assert client.get(f'/api/projects/{project["id"]}').status_code == 404
+
+
+def test_invalid_input_and_origin(client):
+    assert client.post('/api/projects').status_code == 422
+    response = client.post('/api/projects', data={'request': '変更'}, headers={'Origin': 'http://attacker'})
+    assert response.status_code == 403
+    assert client.post('/api/projects', files={'files': ('old.doc', b'old')}).status_code == 422
+    assert client.get('/api/projects', headers={'Host': 'attacker'}).status_code == 400
+
+
+def test_busy_project_rejects_mutation(client):
+    store = client.app.state.store
+    project = store.create(Project(title='Test', request='変更', runs=[Run(kind='extract', revision=0)]))
+    assert client.delete(f'/api/projects/{project.id}').status_code == 409
+    response = client.post(f'/api/projects/{project.id}/runs', json={'revision': 0})
+    assert response.status_code == 409
+
+
+def test_run_completion_and_download(client):
+    store = client.app.state.store
+    project = store.create(Project(title='Test', request='変更', changes=[Change(summary='時間変更')]))
+    response = client.post(f'/api/projects/{project.id}/runs', json={'revision': 0})
+    assert response.status_code == 202
+    run_id = response.json()['id']
+    client.portal.call(wait_for_tasks, client.app.state.workflow)
+    run = client.get(f'/api/runs/{run_id}').json()['run']
+    assert run['status'] == 'completed'
+    proposal = next(iter(run['proposals'].values()))
+    url = f'/api/projects/{project.id}/proposals/{proposal["id"]}'
+    assert client.get(url).json()['modified'] == '# 仕様\n2秒\n'
+    assert client.get(url + '/download?format=diff').text == proposal['diff']
+    assert client.get(url + '/download?format=bad').status_code == 422
+
+
+async def wait_for_tasks(engine):
+    import asyncio
+    await asyncio.gather(*list(engine.tasks))
+
+
+def test_combined_input_limit(client):
+    client.app.state.settings.max_input_chars = 5
+    response = client.post('/api/projects', data={'request': 'ab'}, files={'files': ('a.txt', b'cdef')})
+    assert response.status_code == 413
+
+
+def test_streaming_request_limit(tmp_path):
+    settings = Settings(data_dir=tmp_path, max_file_bytes=1, max_files=1, max_input_chars=1)
+    with TestClient(create_app(settings)) as limited:
+        response = limited.post('/api/projects', files={'files': ('a.txt', b'x' * (1024 * 1024 + 100))})
+        assert response.status_code == 413

@@ -1,5 +1,6 @@
 data_dir = "data"
 ai_config = "env.toml"
+target_roles_file = "target_roles.md"
 generation_model = "generation"
 decision_model = "decision"
 kb_url = "http://127.0.0.1:8000"

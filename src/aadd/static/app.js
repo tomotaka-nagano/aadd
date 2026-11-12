@@ -215,7 +215,11 @@ function renderChanges() {
     const spinner = icon('loader-circle');
     spinner.classList.add('spinning');
     status.append(spinner, node('span', '', '変更内容を抽出中'));
-  } else if (!state.project.changes.length) status.textContent = '変更内容はまだありません。';
+  } else if (!state.project.changes.length) {
+    status.textContent = last?.kind === 'extract' && last.status === 'completed'
+      ? 'このコントローラーの役割に該当する変更は見つかりませんでした。'
+      : '変更内容はまだありません。';
+  }
   if (last?.kind === 'extract' && ['failed', 'interrupted'].includes(last.status)) {
     status.hidden = false;
     status.replaceChildren(...last.issues.map((message) => node('p', '', message)));

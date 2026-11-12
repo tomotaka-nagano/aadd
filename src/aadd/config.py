@@ -10,6 +10,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra='forbid')
     data_dir: Path = Path('data')
     ai_config: Path = Path('env.toml')
+    target_roles_file: Path = Path('target_roles.md')
     generation_model: str = 'generation'
     decision_model: str = 'decision'
     kb_url: str = 'http://127.0.0.1:8000'
@@ -38,4 +39,5 @@ def load_settings() -> Settings:
     settings = Settings.model_validate(values)
     settings.data_dir = (path.parent / settings.data_dir).resolve()
     settings.ai_config = (path.parent / settings.ai_config).resolve()
+    settings.target_roles_file = (path.parent / settings.target_roles_file).resolve()
     return settings

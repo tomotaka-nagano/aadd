@@ -48,6 +48,25 @@ async def finish(engine):
     await asyncio.gather(*list(engine.tasks))
 
 
+async def test_empty_scope_extraction_completes_but_cannot_generate(tmp_path):
+    class EmptyAI(FakeAI):
+        async def extract(self, project):
+            return Extraction(changes=[])
+
+    store = Store(tmp_path)
+    project = store.create(Project(title='Test', request='他のユニット内部の変更'))
+    engine = Workflow(store, Settings(), EmptyAI(), FakeKB())
+    run = await engine.start(project.id, 'extract', 0)
+    await finish(engine)
+    updated = store.get(project.id)
+    assert updated.changes == [] and updated.revision == 1
+    assert store.find_run(run.id)[1].status == 'completed'
+    with pytest.raises(ValueError, match='変更内容を抽出・確認'):
+        await engine.start(project.id, 'generate', 1)
+    with pytest.raises(ValueError):
+        ChangeUpdate(revision=1, changes=[])
+
+
 async def test_extract_and_generate_grouped(tmp_path):
     store = Store(tmp_path)
     ai, kb = FakeAI(), FakeKB()

@@ -23,10 +23,11 @@ class Change(BaseModel):
 
 
 class Extraction(BaseModel):
-    changes: list[Change] = Field(min_length=1, max_length=100)
+    changes: list[Change] = Field(max_length=100)
 
 
 class ChangeUpdate(Extraction):
+    changes: list[Change] = Field(min_length=1, max_length=100)
     revision: int = Field(ge=0)
 
     @model_validator(mode='after')

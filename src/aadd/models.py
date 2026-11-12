@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, JsonValue, model_validator
 
 
 def identifier() -> str:
@@ -24,6 +24,12 @@ class Change(BaseModel):
 
 class Extraction(BaseModel):
     changes: list[Change] = Field(max_length=100)
+
+
+class MaskPreview(BaseModel):
+    message: str
+    system_prompt: str
+    response_schema: dict[str, JsonValue]
 
 
 class ChangeUpdate(Extraction):

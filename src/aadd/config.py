@@ -15,6 +15,10 @@ class Settings(BaseModel):
     decision_model: str = 'decision'
     kb_url: str = 'http://127.0.0.1:8000'
     kb_headers: dict[str, str] = Field(default_factory=dict)
+    redactor_url: str = Field(default='http://127.0.0.1:8509', min_length=1)
+    redactor_headers: dict[str, str] = Field(default_factory=dict)
+    redactor_detection: Literal['ner', 'llm', 'both'] = 'both'
+    redactor_mask_level: Literal['certain', 'strong', 'medium', 'weak', 'faint'] = 'strong'
     allowed_hosts: list[str] = Field(default_factory=lambda: ['127.0.0.1', 'localhost', 'testserver'])
     scope_paths: list[str] = Field(default_factory=list)
     exclude_paths: list[str] = Field(default_factory=list)

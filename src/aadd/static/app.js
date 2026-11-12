@@ -64,6 +64,8 @@ async function action(operation) {
 function controls() {
   const busy = state.pending || running();
   $('#extract-button').disabled = busy;
+  $('#mask-button').disabled = busy;
+  $$('#file-list button').forEach((button) => { button.disabled = state.pending; });
   $('#change-fields').disabled = busy;
   for (const selector of ['#save-changes', '#generate-button', '#add-change', '#delete-project']) {
     $(selector).disabled = busy;
@@ -112,6 +114,7 @@ function abandonEdits() {
 
 async function openProject(projectId) {
   if (!abandonEdits()) return;
+  clearMaskPreview();
   state.epoch += 1;
   state.project = await api(`/api/projects/${projectId}`);
   state.dirty = false;
@@ -131,6 +134,7 @@ function resetProject() {
   state.epoch += 1;
   Object.assign(state, { project: null, files: [], dirty: false, selectedRun: null, selectedProposal: null });
   $('#request-form').reset();
+  clearMaskPreview();
   $('#delete-project').hidden = true;
   $('#request-heading').textContent = '変更要求';
   $('#request-meta').textContent = '';
@@ -170,7 +174,12 @@ function renderFiles() {
       remove.type = 'button';
       remove.title = remove.ariaLabel = '添付を削除';
       remove.append(icon('x'));
-      remove.addEventListener('click', () => { state.files.splice(index, 1); renderFiles(); });
+      remove.addEventListener('click', () => {
+        state.files.splice(index, 1);
+        state.dirty = true;
+        clearMaskPreview();
+        renderFiles();
+      });
       row.append(remove);
     }
     list.append(row);
@@ -403,19 +412,73 @@ function renderCandidates(run) {
   }
 }
 
+function requestData() {
+  const data = new FormData();
+  data.append('request', $('#request-text').value);
+  state.files.forEach((file) => data.append('files', file));
+  return data;
+}
+
+function clearMaskPreview() {
+  $('#mask-preview').hidden = true;
+  $('#mask-status').textContent = '';
+  for (const id of ['mask-request', 'mask-attachments', 'mask-roles', 'mask-instruction', 'mask-message', 'mask-schema']) {
+    $(`#${id}`).replaceChildren();
+  }
+}
+
+function renderMaskPreview(preview) {
+  const data = JSON.parse(preview.message);
+  $('#mask-request').textContent = data.request || '（変更要求の本文なし）';
+  $('#mask-roles').textContent = data.target_roles;
+  $('#mask-instruction').textContent = preview.system_prompt;
+  $('#mask-message').textContent = JSON.stringify(data, null, 2);
+  $('#mask-schema').textContent = JSON.stringify(preview.response_schema, null, 2);
+  for (const [index, attachment] of data.attachments.entries()) {
+    const heading = node('h3', '', `添付 ${index + 1}：${attachment.filename}`);
+    const text = node('pre', 'masked-text', attachment.text);
+    text.tabIndex = 0;
+    text.setAttribute('aria-label', `添付 ${index + 1} のマスク後の本文`);
+    $('#mask-attachments').append(heading, text);
+  }
+  $('#mask-preview').hidden = false;
+  $('#mask-status').textContent = 'マスクが完了しました。抽出用 LLM には送信していません。';
+  $('#mask-preview-heading').focus();
+}
+
+async function previewMask() {
+  clearMaskPreview();
+  $('#mask-status').textContent = 'マスクを実行中です。';
+  $('#mask-button span').textContent = 'マスク中…';
+  try {
+    const preview = state.project
+      ? await api(`/api/projects/${state.project.id}/extraction-previews`, jsonOptions('POST', { revision: state.project.revision }))
+      : await api('/api/extraction-previews', { method: 'POST', body: requestData() });
+    renderMaskPreview(preview);
+  } catch (error) {
+    clearMaskPreview();
+    throw error;
+  } finally {
+    $('#mask-button span').textContent = 'マスクのみ実行・確認';
+  }
+}
+
+$('#mask-button').addEventListener('click', () => action(previewMask));
+$('#close-mask-preview').addEventListener('click', () => {
+  clearMaskPreview();
+  $('#mask-button').focus();
+});
 $('#request-form').addEventListener('submit', (event) => {
   event.preventDefault();
   action(async () => {
     if (state.project && !confirm('変更内容を再抽出しますか？現在の変更内容は置き換わります。')) return;
     if (!state.project) {
-      const data = new FormData();
-      data.append('request', $('#request-text').value);
-      state.files.forEach((file) => data.append('files', file));
-      state.project = await api('/api/projects', { method: 'POST', body: data });
+      state.project = await api('/api/projects', { method: 'POST', body: requestData() });
       state.files = [];
       state.dirty = false;
       await loadHistory();
     }
+    clearMaskPreview();
     await startRun('extract');
   });
 });
@@ -432,12 +495,16 @@ $('#add-change').addEventListener('click', () => {
   $$('.change-item').at(-1).querySelector('input').focus();
 });
 $('#files').addEventListener('change', (event) => {
+  clearMaskPreview();
   state.files.push(...event.target.files);
   state.dirty = true;
   event.target.value = '';
   renderFiles();
 });
-$('#request-text').addEventListener('input', () => { if (!state.project) state.dirty = true; });
+$('#request-text').addEventListener('input', () => {
+  clearMaskPreview();
+  if (!state.project) state.dirty = true;
+});
 $('#new-project').addEventListener('click', resetProject);
 $('#delete-project').addEventListener('click', () => action(async () => {
   if (!confirm('この案件と保存済みの資料・修正案を削除しますか？')) return;

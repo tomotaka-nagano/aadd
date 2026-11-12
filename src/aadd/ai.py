@@ -9,7 +9,8 @@ from typesafe_sdk import Noul, NoulAnswer
 
 from aadd.config import Settings
 from aadd.external import ServiceError, call_service
-from aadd.models import Assessment, Change, Extraction, Generated, Project, Snapshot
+from aadd.models import Assessment, Change, Extraction, Generated, MaskPreview, Project, Snapshot
+from aadd.redactor import MaskResult, Redactor, replace_strings, strings
 
 
 SYSTEM = (
@@ -77,6 +78,7 @@ def read_target_roles(settings: Settings) -> str:
 class AI:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.redactor = Redactor(settings)
         self.clients: dict[str, AsyncClient] = {}
         self.chat_lock = asyncio.Lock()
         self.client_lock = asyncio.Lock()
@@ -107,29 +109,48 @@ class AI:
             client = await self.client(self.settings.generation_model)
             message = encode_data(data)
             await self.budget(message + instruction + encode_data(schema.model_json_schema()), client)
+            message, instruction, masked = await self.mask_input(data, instruction)
+            await self.budget(message + instruction + encode_data(schema.model_json_schema()), client)
 
             async def operation():
                 response = await client.chat.create(message, system_prompt=instruction, response_format=schema)
-                return parse_response(response, schema)
+                parsed = parse_response(response, schema)
+                restored = await self.redactor.unmask(parsed.model_dump(mode='json'), masked.mapping)
+                return schema.model_validate(restored)
 
             return await call_service(operation, self.settings, '生成AIの処理')
 
-    async def extract(self, project: Project) -> Extraction:
+    async def mask_input(self, data, instruction: str) -> tuple[str, str, MaskResult]:
+        masked = await self.redactor.mask([*strings(data), instruction])
+        texts = [part.masked_text for part in masked.masked_parts]
+        return encode_data(replace_strings(data, iter(texts[:-1]))), texts[-1], masked
+
+    async def extraction_data(self, project: Project) -> dict:
         roles = await asyncio.to_thread(read_target_roles, self.settings)
-        data = {
+        return {
             'target_roles': roles,
             'request': project.request,
             'attachments': [item.model_dump() for item in project.attachments],
         }
-        return await self.structured(data, Extraction, EXTRACT)
+
+    async def preview_extraction(self, project: Project) -> MaskPreview:
+        data = await self.extraction_data(project)
+        message, instruction, _ = await self.mask_input(data, EXTRACT)
+        return MaskPreview(message=message, system_prompt=instruction, response_schema=Extraction.model_json_schema())
+
+    async def extract(self, project: Project) -> Extraction:
+        return await self.structured(await self.extraction_data(project), Extraction, EXTRACT)
 
     async def assess(self, change: Change, document: Snapshot) -> Assessment:
         client = await self.client(self.settings.decision_model)
-        state = encode_data({'change': change.model_dump(), 'specification': document.text})
+        data = {'change': change.model_dump(), 'specification': document.text}
+        state = encode_data(data)
         await self.budget(state + QUESTION, client, output=False)
+        state, question, _ = await self.mask_input(data, QUESTION)
+        await self.budget(state + question, client, output=False)
 
         async def operation():
-            response = await client.decision.system_one(state, {'needs_modification': Noul(instructions=QUESTION)})
+            response = await client.decision.system_one(state, {'needs_modification': Noul(instructions=question)})
             return necessity(response)
 
         return await call_service(operation, self.settings, 'Decision-1の判断')

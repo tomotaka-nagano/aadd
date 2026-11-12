@@ -43,8 +43,27 @@
             <input id="files" type="file" multiple accept=".docx,.xlsx,.pptx,.pdf,.txt,.md" class="file-input">
             <ul id="file-list" class="file-list"></ul>
             <div id="attachment-warnings" class="warnings"></div>
-            <div class="form-footer"><span id="request-meta" class="muted"></span><button id="extract-button" type="submit" class="button primary"><i data-lucide="list-filter"></i><span>変更内容を抽出</span></button></div>
+            <div class="form-footer">
+              <span id="request-meta" class="muted"></span>
+              <div class="request-actions">
+                <button id="mask-button" type="button" class="button secondary"><i data-lucide="shield-check"></i><span>マスクのみ実行・確認</span></button>
+                <button id="extract-button" type="submit" class="button primary"><i data-lucide="list-filter"></i><span>変更内容を抽出</span></button>
+              </div>
+            </div>
+            <p class="muted">マスクのみ実行すると、変更内容の抽出用 LLM に送信せずに入力を確認できます。マスクサーバーの設定によっては検出用 LLM を利用します。</p>
           </form>
+          <p id="mask-status" class="muted" role="status"></p>
+          <section id="mask-preview" class="mask-preview" aria-labelledby="mask-preview-heading" hidden>
+            <div class="section-heading"><h2 id="mask-preview-heading" tabindex="-1">マスク後の送信内容</h2><button id="close-mask-preview" type="button" class="icon-button" title="プレビューを閉じる" aria-label="プレビューを閉じる"><i data-lucide="x"></i></button></div>
+            <p class="muted">確認用のプレビューです。この操作では変更内容を抽出していません。抽出ボタンを押すと改めてマスクします。入力・役割記述・辞書・検出結果の変化により、送信内容が変わる場合があります。</p>
+            <h3 id="mask-request-heading">変更要求</h3>
+            <pre id="mask-request" class="masked-text" tabindex="0" aria-labelledby="mask-request-heading"></pre>
+            <div id="mask-attachments"></div>
+            <details><summary>対象コントローラーの役割（マスク後）</summary><pre id="mask-roles" class="masked-text" tabindex="0" aria-label="マスク後の役割記述"></pre></details>
+            <details><summary>システム指示（マスク後）</summary><pre id="mask-instruction" class="masked-text" tabindex="0" aria-label="マスク後のシステム指示"></pre></details>
+            <details><summary>送信メッセージ全体（JSON）</summary><pre id="mask-message" class="masked-text" tabindex="0" aria-label="マスク後の送信メッセージ"></pre></details>
+            <details><summary>応答スキーマ</summary><pre id="mask-schema" class="masked-text" tabindex="0" aria-label="応答スキーマ"></pre></details>
+          </section>
         </section>
         <section id="changes-panel" aria-labelledby="changes-heading" hidden>
           <div class="section-heading"><div><span class="eyebrow">Change items</span><h1 id="changes-heading">変更内容</h1></div><span id="revision" class="metadata"></span></div>

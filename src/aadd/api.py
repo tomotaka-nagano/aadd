@@ -8,7 +8,8 @@ from fastapi.responses import Response
 from starlette.datastructures import UploadFile
 
 from aadd.attachments import extract
-from aadd.models import ChangeUpdate, Project, RunRequest
+from aadd.models import ChangeUpdate, MaskPreview, Project, RunRequest
+from aadd.storage import Conflict, editable
 from aadd.workflow import update_changes
 
 
@@ -78,6 +79,22 @@ async def create_project(request: Request):
     except Exception:
         await asyncio.to_thread(shutil.rmtree, directory, True)
         raise
+
+
+@router.post('/extraction-previews', response_model=MaskPreview)
+async def preview_new_extraction(request: Request):
+    project, _ = await read_project(request)
+    return await services(request)[1].ai.preview_extraction(project)
+
+
+@router.post('/projects/{project_id}/extraction-previews', response_model=MaskPreview)
+async def preview_saved_extraction(project_id: str, body: RunRequest, request: Request):
+    store, workflow = services(request)
+    project = await asyncio.to_thread(store.get, project_id)
+    editable(project)
+    if project.revision != body.revision:
+        raise Conflict('古い版です。案件を再読込みしてください。')
+    return await workflow.ai.preview_extraction(project)
 
 
 @router.get('/projects/{project_id}')

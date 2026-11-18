@@ -15,7 +15,8 @@
 - exmgai 0.0.9 の AsyncClient、chat.create(response_format=...)、decision.system_one を使用。
 - typesafe-sdk の公開 Noul / NoulAnswer を利用。answers['needs_modification'].noul が必要性確率。
 - 確率の不正値・NaN・欠落を拒否。必要性と KB の max_score は混同しない。
-- KB の POST /api/search_documents、POST /api/download_document を利用。text/base64 の両取得形式を検証。
+- 当初は KB の REST API を仮定していたが、実装と不一致だったため MCP ツール呼出しへ修正。
+  詳細は [KB 接続方式の修正](kb-mcp-connection.md) を参照。text/base64 の両取得形式を検証。
 - exmgai の標準添付パーサーは PDF のみのため、Office はアプリ側で抽出。
 
 ## 検証結果

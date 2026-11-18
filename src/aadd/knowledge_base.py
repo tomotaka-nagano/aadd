@@ -1,8 +1,13 @@
 import base64
 import hashlib
+import json
 from pathlib import PurePosixPath
+from typing import Any
 
 import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel
 
 from aadd.config import Settings
@@ -14,27 +19,47 @@ class SearchResponse(BaseModel):
     documents: list[Candidate]
 
 
+def tool_data(result: CallToolResult) -> dict[str, Any]:
+    if result.isError:
+        raise ServiceError('ナレッジベースのMCPツールがエラーを返しました。KBのログを確認してください。')
+    data = result.structuredContent
+    if data is None and len(result.content) == 1 and isinstance(result.content[0], TextContent):
+        data = json.loads(result.content[0].text)
+    if not isinstance(data, dict) or data.get('error'):
+        raise ServiceError('ナレッジベースのMCP応答が不正、または処理に失敗しました。KBのログを確認してください。')
+    return data
+
+
 class KnowledgeBase:
-    def __init__(self, settings: Settings, transport=None):
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
         self.settings = settings
         self.transport = transport
 
-    async def post(self, endpoint: str, payload: dict) -> dict:
+    async def call_tool(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         async def operation():
-            async with httpx.AsyncClient(timeout=self.settings.timeout_seconds, transport=self.transport) as client:
-                response = await client.post(self.settings.kb_url.rstrip('/') + endpoint, json=payload,
-                                             headers=self.settings.kb_headers)
-                response.raise_for_status()
-                return response.json()
+            url = httpx.URL(self.settings.kb_url)
+            url = url.copy_with(path='/mcp') if url.path in {'', '/'} else url
+            async with httpx.AsyncClient(timeout=self.settings.timeout_seconds, transport=self.transport,
+                                         headers=self.settings.kb_headers) as client:
+                async with streamable_http_client(str(url), http_client=client) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        return await session.call_tool(name, payload)
 
-        return await call_service(operation, self.settings, 'ナレッジベースの処理')
+        result = await call_service(operation, self.settings, 'ナレッジベースの処理')
+        try:
+            return tool_data(result)
+        except ServiceError:
+            raise
+        except (ValueError, TypeError) as error:
+            raise ServiceError('ナレッジベースのMCP応答を読み取れません。KBのログを確認してください。') from error
 
     async def search(self, change: Change) -> list[Candidate]:
         payload = {'query': '\n'.join(filter(None, [change.summary, change.before, change.after])),
                    'limit': self.settings.candidate_limit, 'mode': self.settings.search_mode,
                    'scope_paths': self.settings.scope_paths or None,
                    'exclude_paths': self.settings.exclude_paths or None}
-        result = SearchResponse.model_validate(await self.post('/api/search_documents', payload))
+        result = SearchResponse.model_validate(await self.call_tool('search_documents', payload))
         documents = {}
         for item in result.documents:
             if PurePosixPath(item.file_path).suffix.lower() == '.md':
@@ -44,7 +69,7 @@ class KnowledgeBase:
 
     async def download(self, candidate: Candidate) -> Snapshot:
         payload = {'document_id': candidate.document_id, 'encoding': 'text', 'include_images': False}
-        data = await self.post('/api/download_document', payload)
+        data = await self.call_tool('download_document', payload)
         if data.get('status') != 'success':
             raise ServiceError('仕様書の取得に失敗しました。KB上の文書を確認してください。')
         if data.get('encoding') not in {'text', 'base64'}:

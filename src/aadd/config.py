@@ -13,7 +13,7 @@ class Settings(BaseModel):
     target_roles_file: Path = Path('target_roles.md')
     generation_model: str = 'generation'
     decision_model: str = 'decision'
-    kb_url: str = 'http://127.0.0.1:8000'
+    kb_url: str = 'http://127.0.0.1:8000/mcp'
     kb_headers: dict[str, str] = Field(default_factory=dict)
     redactor_url: str = Field(default='http://127.0.0.1:8509', min_length=1)
     redactor_headers: dict[str, str] = Field(default_factory=dict)

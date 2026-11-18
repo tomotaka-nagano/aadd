@@ -8,7 +8,7 @@
 - Python 3.13 以上、uv、Git が必要です。
 - 内製ライブラリ exmgai は GitHub リポジトリ `https://github.com/tomotaka-nagano/exmgai` の
   `v0.0.10` タグから取得します。ローカルへの事前配置は不要ですが、非公開リポジトリを読み取れる Git 認証が必要です。
-- KB は既存の kb-mcp の HTTP API を利用します。連携先リポジトリの変更は不要です。
+- KB は既存の kb-mcp の MCP（Streamable HTTP）を利用します。連携先リポジトリの変更は不要です。
 - マスク／アンマスクには別途起動した data-redactor の HTTP API を必ず利用します。
 
 ```powershell
@@ -32,7 +32,7 @@ AI のモデル名はアプリ設定と exmgai 設定で一致させてくださ
 | `ai_config` | exmgai の設定ファイル。生成モデルと Microsoft-Decision-1 の接続を定義 |
 | `target_roles_file` | 対象コントローラーの役割 Markdown。既定 `target_roles.md` |
 | `generation_model` / `decision_model` | exmgai の `models.name`。判断モデルの provider は `foundry` |
-| `kb_url` / `kb_headers` | KB の URL と必要に応じた認証ヘッダー |
+| `kb_url` / `kb_headers` | KB の MCP エンドポイント（既定 `http://127.0.0.1:8000/mcp`）と必要に応じた認証ヘッダー |
 | `redactor_url` / `redactor_headers` | data-redactor API の URL（既定 `http://127.0.0.1:8509`）と必要に応じた認証ヘッダー |
 | `redactor_detection` | 検出方法。`ner` / `llm` / `both`（既定 `both`） |
 | `redactor_mask_level` | 自動マスクの下限。`certain` / `strong` / `medium` / `weak` / `faint`（既定 `strong`） |
@@ -46,6 +46,25 @@ AI のモデル名はアプリ設定と exmgai 設定で一致させてくださ
 `AADD_CONFIG` 環境変数でアプリ設定のパスを指定できます。
 保存先を変更する場合は、そのフォルダーも Git 管理対象外にしてください。
 設定を変更した場合はサーバーを再起動してください。
+
+### ナレッジベースへの接続
+
+kb-mcp は REST API ではなく MCP ツールを公開しています。
+kb-mcp 側を Streamable HTTP で起動し、`kb_url` に `/mcp` を含むエンドポイントを設定してください。
+stdio や旧 SSE トランスポート（`/sse`）には接続しません。
+
+```powershell
+uv run kb-mcp-server --transport http --host 127.0.0.1 --port 8000
+```
+
+上記は kb-mcp のリポジトリで実行します。既にサーバーが起動している場合、再起動は不要です。
+既存設定との互換性のため、`http://127.0.0.1:8000` のようなホスト URL は `/mcp` を補完します。
+リバースプロキシ配下では `https://example.test/kb/mcp` のように完全なエンドポイントを指定します。
+
+公式 Python MCP SDK でセッションを初期化し、`search_documents` と `download_document` を呼び出します。
+原文はリソースのチャンク再構成ではなく、`download_document` で取得します。
+検索フィルター、Markdown の限定・重複排除、原文ハッシュ、タイムアウト・再試行は維持します。
+呼出しごとにセッションを開閉するため、再試行時も新しいセッションで接続します。
 
 ### 対象コントローラーの役割
 
@@ -188,7 +207,7 @@ node --check src/aadd/static/app.js
 uv run python -m uvicorn test_api:browser_app --app-dir tests --factory --host 127.0.0.1 --port 8002
 ```
 
-実接続確認では、設定した KB の `POST /api/search_documents` と `POST /api/download_document`、
+実接続確認では、設定した KB の MCP エンドポイント経由で `search_documents` と `download_document`、
 マスク API の `POST /mask` と `POST /unmask`、生成 AI、Microsoft-Decision-1 を使い、
 既知の要求・Markdown で結果を確認してください。
 実装時点では実サービスへの接続は未検証です。

@@ -42,8 +42,10 @@ def lifespan_for(settings, ai, kb):
         await asyncio.to_thread(store.interrupt)
         application.state.store = store
         application.state.workflow = Workflow(store, settings, ai, kb)
-        yield
-        await application.state.workflow.close()
+        try:
+            yield
+        finally:
+            await application.state.workflow.close()
 
     return lifespan
 

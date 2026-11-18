@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from exmgai import AsyncClient
 from exmgai.decision import DecisionResponse
 import httpx
 import pytest
@@ -99,6 +100,30 @@ async def test_token_budget_stops_without_truncating():
     client = SimpleNamespace(context_window=128000, max_output_tokens=16000)
     with pytest.raises(ServiceError, match='トークン上限'):
         await ai.budget('長い入力文です。' * 100, client)
+
+
+async def test_close_releases_all_clients_only_once():
+    ai = AI(Settings())
+    generation, decision = AsyncMock(spec=AsyncClient), AsyncMock(spec=AsyncClient)
+    ai.clients.update(generation=generation, decision=decision)
+    await ai.close()
+    await ai.close()
+    generation.close.assert_awaited_once()
+    decision.close.assert_awaited_once()
+    assert not ai.clients
+
+
+async def test_close_attempts_all_clients_and_surfaces_failures():
+    ai = AI(Settings())
+    generation, decision = AsyncMock(spec=AsyncClient), AsyncMock(spec=AsyncClient)
+    failure = RuntimeError('SDK close failed')
+    generation.close.side_effect = failure
+    ai.clients.update(generation=generation, decision=decision)
+    with pytest.raises(ExceptionGroup, match='AIクライアントの終了処理') as caught:
+        await ai.close()
+    assert caught.value.exceptions == (failure,)
+    generation.close.assert_awaited_once()
+    decision.close.assert_awaited_once()
 
 
 async def test_extract_includes_roles_as_separate_scope(monkeypatch, role_settings):

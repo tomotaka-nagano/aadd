@@ -41,6 +41,15 @@ def test_health_without_settings(client):
     assert client.get('/api/health').json() == {'status': 'ok', 'ai_configured': False}
 
 
+def test_shutdown_closes_ai_even_when_lifespan_body_fails(tmp_path):
+    ai = FakeAI()
+    application = create_app(Settings(data_dir=tmp_path), ai=ai, kb=FakeKB())
+    with pytest.raises(RuntimeError, match='application failed'):
+        with TestClient(application):
+            raise RuntimeError('application failed')
+    assert ai.closed
+
+
 def test_static_application(client):
     response = client.get('/')
     assert response.status_code == 200

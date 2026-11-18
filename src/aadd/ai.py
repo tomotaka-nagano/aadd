@@ -89,6 +89,15 @@ class AI:
                 self.clients[name] = await asyncio.to_thread(self._build, name)
             return self.clients[name]
 
+    async def close(self) -> None:
+        async with self.client_lock:
+            clients = list(self.clients.values())
+            self.clients.clear()
+            results = await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise BaseExceptionGroup('AIクライアントの終了処理に失敗しました。', errors)
+
     def _build(self, name: str) -> AsyncClient:
         if not self.settings.ai_config.is_file():
             raise ServiceError('AI設定がありません。env.toml.exampleを参照してenv.tomlを設定してください。')

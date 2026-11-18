@@ -5,7 +5,7 @@ description = "AI aided functional specification updates"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-	"exmgai",
+	"exmgai>=0.0.10",
 	"fastapi>=0.115",
 	"httpx>=0.28",
 	"openpyxl>=3.1",

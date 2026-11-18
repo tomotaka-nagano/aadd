@@ -14,6 +14,10 @@ class FakeAI:
         self.generated = []
         self.assessed = []
         self.fail_once = False
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
     async def extract(self, project):
         return Extraction(changes=[Change(summary='時間変更', before='1秒', after='2秒')])
@@ -220,8 +224,35 @@ async def test_cancel_and_restart_preserves_checkpoint(tmp_path):
     with pytest.raises(Conflict):
         await engine.start(project.id, 'generate', 0)
     await engine.close()
+    assert engine.ai.closed
     assert store.find_run(run.id)[1].status == 'interrupted'
     restarted = Workflow(Store(tmp_path), Settings(), FakeAI(), FakeKB())
     await restarted.retry(run.id)
     await finish(restarted)
     assert restarted.store.find_run(run.id)[1].status == 'completed'
+
+
+async def test_close_waits_for_tasks_before_releasing_ai(tmp_path):
+    class ClosingAI(FakeAI):
+        async def close(self):
+            assert stopped.is_set()
+            await super().close()
+
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def operation():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            stopped.set()
+
+    ai = ClosingAI()
+    engine = Workflow(Store(tmp_path), Settings(), ai, FakeKB())
+    task = asyncio.create_task(operation())
+    engine.tasks.add(task)
+    await started.wait()
+    await engine.close()
+    assert task.cancelled()
+    assert ai.closed

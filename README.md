@@ -6,13 +6,18 @@
 ## セットアップ
 
 - Python 3.13 以上、uv が必要です。
-- 内製ライブラリ exmgai が `../exmgai` に存在する構成を前提にしています。
+- 内製ライブラリ exmgai 0.0.10 以上が `../exmgai` に存在する構成を前提にしています。
 - KB は既存の kb-mcp の HTTP API を利用します。連携先リポジトリの変更は不要です。
 - マスク／アンマスクには別途起動した data-redactor の HTTP API を必ず利用します。
 
 ```powershell
 uv sync
 ```
+
+exmgai 0.0.10 では、Entra ID 認証による非同期 LLM 呼出し時の TypeError が修正されています。
+ローカル参照先を更新した場合も `uv sync` を実行し、起動中のアプリを再起動してください。
+アプリ終了時は実行中タスクを停止してから、生成・判断用クライアントの `close()` を呼び出します。
+ライブラリが保持する HTTP 接続・非同期資格情報を解放し、終了処理の失敗は例外として通知します。
 
 `config.toml.example` を参考に `config.toml`、`env.toml.example` を参考に `env.toml` を用意します。
 対象コントローラーの役割は、`target_roles.md.example` を参考に `target_roles.md` へ記述します。

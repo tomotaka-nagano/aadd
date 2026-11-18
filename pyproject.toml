@@ -27,7 +27,7 @@ build-backend = "hatchling.build"
 dev = ["flake8>=7.3", "pytest>=8.3", "pytest-asyncio>=0.25"]
 
 [tool.uv.sources]
-exmgai = { path = "../exmgai", editable = true }
+exmgai = { git = "https://github.com/tomotaka-nagano/exmgai.git", tag = "v0.0.10" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

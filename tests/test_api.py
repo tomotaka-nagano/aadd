@@ -91,7 +91,7 @@ def test_busy_project_rejects_mutation(client):
     assert response.status_code == 409
 
 
-def test_run_completion_and_download(client):
+def test_run_completion_and_download(client, capsys):
     store = client.app.state.store
     project = store.create(Project(title='Test', request='変更', changes=[Change(summary='時間変更')]))
     response = client.post(f'/api/projects/{project.id}/runs', json={'revision': 0})
@@ -100,6 +100,9 @@ def test_run_completion_and_download(client):
     client.portal.call(wait_for_tasks, client.app.state.workflow)
     run = client.get(f'/api/runs/{run_id}').json()['run']
     assert run['status'] == 'completed'
+    assert client.get(f'/api/runs/{run_id}').status_code == 200
+    usage = [json.loads(line) for line in capsys.readouterr().out.splitlines() if '"event": "model_usage"' in line]
+    assert len(usage) == 1 and usage[0]['run_id'] == run_id
     proposal = next(iter(run['proposals'].values()))
     url = f'/api/projects/{project.id}/proposals/{proposal["id"]}'
     assert client.get(url).json()['modified'] == '# 仕様\n2秒\n'

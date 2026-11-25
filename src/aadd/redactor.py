@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+import re
 from typing import TypeVar
 
 import httpx
@@ -40,6 +41,45 @@ class MaskedPart(BaseModel):
 class MaskResult(BaseModel):
     masked_parts: list[MaskedPart]
     mapping: list[dict[str, JsonValue]]
+
+
+def merge_masks(results: list[MaskResult]) -> list[MaskResult]:
+    used = {entry.get('placeholder') for result in results for entry in result.mapping
+            if isinstance(entry.get('placeholder'), str)}
+    by_label: dict[str, str] = {}
+    by_original: dict[str, str] = {}
+    merged = []
+    for result in results:
+        labels: dict[str, str] = {}
+        mapping = []
+        for entry in result.mapping:
+            label, original = entry.get('placeholder'), entry.get('canonical')
+            surfaces = entry.get('surfaces')
+            if not original and isinstance(surfaces, list) and surfaces:
+                original = surfaces[0]
+            if not isinstance(label, str) or not label or not isinstance(original, str) or not original:
+                raise ServiceError('マスクAPIの対応表が不正です。')
+            target = by_original.get(original, label)
+            if target in by_label and by_label[target] != original:
+                index = len(by_label) + 1
+                target = f'[MASK_{index}]'
+                while target in used or target in by_label or any(
+                    target in part.masked_text for batch in results for part in batch.masked_parts
+                ):
+                    index += 1
+                    target = f'[MASK_{index}]'
+            if label in labels and labels[label] != target:
+                raise ServiceError('マスクAPIの対応表内で伏せ字が衝突しています。')
+            labels[label] = target
+            if target not in by_label:
+                mapping.append({**entry, 'placeholder': target})
+                by_label[target] = original
+                by_original[original] = target
+        pattern = re.compile('|'.join(map(re.escape, sorted(labels, key=len, reverse=True)))) if labels else None
+        parts = [MaskedPart(id=part.id, masked_text=pattern.sub(lambda m: labels[m[0]], part.masked_text))
+                 for part in result.masked_parts] if pattern else result.masked_parts
+        merged.append(MaskResult(masked_parts=parts, mapping=mapping))
+    return merged
 
 
 class UnmaskResult(BaseModel):

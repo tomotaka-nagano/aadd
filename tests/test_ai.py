@@ -8,11 +8,13 @@ import httpx
 import pytest
 from typesafe_sdk import Noul, NoulAnswer
 
-from aadd.ai import AI, EXTRACT, necessity, parse_response
+from aadd.ai import AI, DocumentMasks, PLAN_EXTRACT, document_masks, necessity, parse_response
 from aadd.config import Settings, load_settings
 from aadd.external import ServiceError
-from aadd.models import Attachment, Change, Extraction, Project, Snapshot
+from aadd.models import Attachment, Change, Extraction, ExtractionPlan, Project, Snapshot
+from aadd.models import SpecificationSearch
 from aadd.redactor import MaskResult, Redactor
+from aadd.usage import RunUsage, run_usage
 
 
 @pytest.fixture(autouse=True)
@@ -139,9 +141,9 @@ async def test_extract_includes_roles_as_separate_scope(monkeypatch, role_settin
     assert data['target_roles'] == role_settings.target_roles_file.read_text(encoding='utf-8').strip()
     assert data['request'] == project.request
     assert data['attachments'][0]['text'] == '詳細の変更要求'
-    assert method.call_args.kwargs['system_prompt'] == EXTRACT
-    assert '範囲外の変更は含めない' in EXTRACT
-    assert '役割記述は変更要求ではありません' in EXTRACT
+    assert method.call_args.kwargs['system_prompt'] == PLAN_EXTRACT
+    assert '範囲外の変更は含めない' in PLAN_EXTRACT
+    assert '役割記述は変更要求ではありません' in PLAN_EXTRACT
 
 
 @pytest.mark.parametrize('content', [None, '', ' \n\t ', b'\xff\xfe'])
@@ -252,7 +254,7 @@ async def test_generate_masks_specification_and_restores_full_markdown(monkeypat
     assert result.modified == '# 秘密社\n\n新仕様'
     assert result.summary == '秘密社の変更'
     assert result.change_ids == ['c1']
-    assert len([path for path, _ in requests if path == '/mask']) == 1
+    assert [body['parts'] for path, body in requests if path == '/mask'][1] == [{'id': '0', 'text': secret}]
 
 
 async def test_decision_masks_inputs_without_unmasking(monkeypatch):
@@ -269,7 +271,115 @@ async def test_decision_masks_inputs_without_unmasking(monkeypatch):
     assert data['change']['summary'] == data['specification'] == '[社1]'
     assert '秘密社' not in str(method.call_args)
     assert result.score == 0.91
-    assert [path for path, _ in requests] == ['/mask']
+    assert [path for path, _ in requests] == ['/mask', '/mask']
+    assert requests[1][1]['parts'] == [{'id': '0', 'text': '秘密社'}]
+
+
+async def test_standalone_document_mask_is_reused_and_conflicting_labels_restore(monkeypatch, redaction_api):
+    ai = AI(Settings())
+    batches = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        if request.url.path == '/mask':
+            batches.append(body['parts'])
+            text = '文書の社名' if body['parts'] == [{'id': '0', 'text': '文書の社名'}] else '要求の社名'
+            return httpx.Response(200, json={
+                'masked_parts': [{'id': p['id'], 'masked_text': p['text'].replace(text, '[社1]')}
+                                 for p in body['parts']],
+                'mapping': [{'placeholder': '[社1]', 'canonical': text}],
+            })
+        text = body['text']
+        for item in body['mapping']:
+            text = text.replace(item['placeholder'], item['canonical'])
+        return httpx.Response(200, json={'restored_text': text})
+
+    async def generate(message, **kwargs):
+        data = json.loads(message)
+        assert data['specification'] != data['changes'][0]['summary']
+        assert '文書の社名' not in message and '要求の社名' not in message
+        return SimpleNamespace(content={'modified': data['specification'], 'summary': data['changes'][0]['summary'],
+                                        'change_ids': ['c']})
+
+    ai.redactor = Redactor(ai.settings, httpx.MockTransport(handler))
+    response = DecisionResponse(model='decision', usage={'input_tokens': 100},
+                                answers={'needs_modification': NoulAnswer(noul=0.9)})
+    client = SimpleNamespace(context_window=128000, max_output_tokens=16000, chat=SimpleNamespace(create=generate),
+                             decision=SimpleNamespace(system_one=AsyncMock(return_value=response)))
+    monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
+    doc = Snapshot(document_id='d', file_path='d.md', sha256='hash', text='文書の社名')
+    change = Change(id='c', summary='要求の社名')
+    token = document_masks.set(DocumentMasks())
+    try:
+        await ai.assess(change, doc)
+        result = await ai.generate([change], doc)
+    finally:
+        document_masks.reset(token)
+    assert batches.count([{'id': '0', 'text': '文書の社名'}]) == 1
+    assert all(not any(part['text'] == '文書の社名' for part in batch)
+               for batch in batches if len(batch) > 1)
+    assert (result.modified, result.summary) == ('文書の社名', '要求の社名')
+
+
+async def test_usage_counts_model_response_before_failed_validation(monkeypatch, role_settings):
+    role_settings.retry_count = 0
+    ai = AI(role_settings)
+    ai.rates[role_settings.generation_model] = (2.0, 4.0)
+    method = AsyncMock(return_value=SimpleNamespace(content={'changes': [{'summary': ''}]},
+                                                    input_tokens=100, output_tokens=50))
+    client = SimpleNamespace(context_window=128000, max_output_tokens=16000, chat=SimpleNamespace(create=method))
+    monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
+    usage = RunUsage()
+    token = run_usage.set(usage)
+    try:
+        with pytest.raises(ServiceError):
+            await ai.extract(Project(title='Test', request='変更'))
+    finally:
+        run_usage.reset(token)
+    assert usage.generation.calls == 1
+    assert usage.generation.estimated_usd == pytest.approx(0.0004)
+    assert usage.generation.unpriced_calls == 0
+
+
+async def test_refine_sends_masked_excerpt_and_resolves_valid_evidence(monkeypatch, role_settings):
+    ai = AI(role_settings)
+    requests = use_sensitive_redactor(ai, '秘密社')
+    document = Snapshot(document_id='d', file_path='秘密社.md', sha256='hash',
+                        text='# 仕様\n\n' + ('無関係な行\n' * 50) + '停止時間は秘密社構成で1秒')
+    draft = ExtractionPlan(changes=[Change(summary='時間変更', after='2秒')],
+                           searches=[SpecificationSearch(query='停止時間', question='現状は何秒か')])
+
+    async def reply(message, **kwargs):
+        data = json.loads(message)
+        assert '秘密社' not in message and '秘密社.md' not in message
+        assert len(data['evidence']) == 1
+        assert len(data['evidence'][0]['excerpt'].splitlines()) < 10
+        assert '停止時間は[社1]構成で1秒' in data['evidence'][0]['excerpt']
+        return SimpleNamespace(content={'changes': [{
+            'summary': '時間変更', 'before': '1秒', 'after': '2秒', 'sources': ['変更要求'],
+            'evidence_ids': ['kb_1'],
+        }]})
+
+    method = AsyncMock(side_effect=reply)
+    client = SimpleNamespace(context_window=128000, max_output_tokens=16000, chat=SimpleNamespace(create=method))
+    monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
+    result = await ai.refine({'request': '停止時間を2秒に変更'}, draft, [('kb_1', document, '停止時間')])
+    assert result.changes[0].before == '1秒' and result.changes[0].after == '2秒'
+    assert result.changes[0].sources[0] == '変更要求'
+    assert result.changes[0].sources[1].startswith('秘密社.md:')
+    assert [body['parts'] for path, body in requests if path == '/mask'][1] == [{'id': '0', 'text': document.text}]
+
+
+async def test_refine_rejects_unsent_document_reference(monkeypatch, role_settings):
+    role_settings.retry_count = 0
+    ai = AI(role_settings)
+    response = SimpleNamespace(content={'changes': [{'summary': '時間変更', 'evidence_ids': ['not_sent']}]})
+    client = SimpleNamespace(context_window=128000, max_output_tokens=16000,
+                             chat=SimpleNamespace(create=AsyncMock(return_value=response)))
+    monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
+    document = Snapshot(document_id='d', file_path='d.md', sha256='hash', text='停止時間は1秒')
+    with pytest.raises(ServiceError, match='生成AIの処理'):
+        await ai.refine({'request': '時間変更'}, ExtractionPlan(changes=[]), [('kb_1', document, '停止時間')])
 
 
 @pytest.mark.parametrize('operation', ['extract', 'generate', 'assess'])
@@ -324,7 +434,7 @@ async def test_masked_input_budget_is_checked_before_model_call(monkeypatch, ope
             await ai.generate([Change(summary='変更')], document)
         else:
             await ai.assess(Change(summary='変更'), document)
-    ai.redactor.mask.assert_awaited_once()
+    assert ai.redactor.mask.await_count == 2
     method.assert_not_awaited()
 
 
@@ -342,7 +452,7 @@ async def test_preview_uses_extraction_input_without_ai_config_or_model_call(mon
     assert '秘密社' not in preview.model_dump_json()
     assert 'mapping' not in preview.model_dump()
     assert json.loads(preview.message)['attachments'][0]['text'] == '[社1]の仕様'
-    assert preview.response_schema == Extraction.model_json_schema()
+    assert preview.response_schema == ExtractionPlan.model_json_schema()
     method = AsyncMock(return_value=SimpleNamespace(content={'changes': []}))
     client = SimpleNamespace(context_window=128000, max_output_tokens=16000, chat=SimpleNamespace(create=method))
     monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))

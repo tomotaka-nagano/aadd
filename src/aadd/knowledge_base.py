@@ -55,8 +55,10 @@ class KnowledgeBase:
             raise ServiceError('ナレッジベースのMCP応答を読み取れません。KBのログを確認してください。') from error
 
     async def search(self, change: Change) -> list[Candidate]:
-        payload = {'query': '\n'.join(filter(None, [change.summary, change.before, change.after])),
-                   'limit': self.settings.candidate_limit, 'mode': self.settings.search_mode,
+        return await self.search_query('\n'.join(filter(None, [change.summary, change.before, change.after])))
+
+    async def search_query(self, query: str) -> list[Candidate]:
+        payload = {'query': query, 'limit': self.settings.candidate_limit, 'mode': self.settings.search_mode,
                    'scope_paths': self.settings.scope_paths or None,
                    'exclude_paths': self.settings.exclude_paths or None}
         result = SearchResponse.model_validate(await self.call_tool('search_documents', payload))
@@ -74,7 +76,9 @@ class KnowledgeBase:
             raise ServiceError('仕様書の取得に失敗しました。KB上の文書を確認してください。')
         if data.get('encoding') not in {'text', 'base64'}:
             raise ServiceError('仕様書のエンコーディングが不正です。')
-        content = data['content']
+        content = data.get('content')
+        if not isinstance(content, str):
+            raise ServiceError('仕様書の本文が不正です。')
         text = base64.b64decode(content, validate=True).decode('utf-8-sig') if data['encoding'] == 'base64' else content
         if not text.strip() or len(text) > self.settings.max_document_chars:
             raise ServiceError('仕様書が空、または文字数上限超過です。')

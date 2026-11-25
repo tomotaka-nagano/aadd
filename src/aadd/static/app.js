@@ -6,6 +6,7 @@ const state = { project: null, files: [], dirty: false, pending: false, phase: '
   selectedRun: null, selectedProposal: null, document: 'diff', epoch: 0, projects: [] };
 const statusNames = { draft: '入力済み', running: '処理中', completed: '完了', review: '要確認', failed: '失敗', interrupted: '中断' };
 const stageNames = { queued: '開始待ち', extracting: '変更内容を抽出中', searching: '仕様書を検索中',
+  searching_requirements: '要求整理のため既存仕様を確認中', refining_requirements: '既存仕様に照らして変更内容を整理中',
   assessing: '修正必要性を判断中', generating: '修正案を生成中', finished: '完了', awaiting_confirmation: '確認待ち' };
 
 function node(tag, className = '', text = '') {
@@ -215,15 +216,23 @@ function renumber() {
 function renderChanges() {
   $('#change-list').replaceChildren();
   state.project.changes.forEach(appendChange);
-  const last = state.project.runs.at(-1);
+  renderExtractionStatus();
+}
+
+function renderExtractionStatus() {
+  const last = [...state.project.runs].reverse().find((run) => run.kind === 'extract');
   const extracting = last?.kind === 'extract' && last.status === 'running';
+  const warnings = last?.status === 'completed' ? last.extraction_warnings || [] : [];
   const status = $('#extraction-status');
-  status.hidden = !extracting && state.project.changes.length > 0;
+  status.hidden = !extracting && !warnings.length && state.project.changes.length > 0;
   status.replaceChildren();
   if (extracting) {
     const spinner = icon('loader-circle');
     spinner.classList.add('spinning');
-    status.append(spinner, node('span', '', '変更内容を抽出中'));
+    status.append(spinner, node('span', '', stageNames[last.stage] || '変更内容を抽出中'));
+  } else if (warnings.length) {
+    status.append(node('strong', '', '暫定結果：既存仕様に未確認の点があります。'),
+      ...warnings.map((message) => node('p', '', message)));
   } else if (!state.project.changes.length) {
     status.textContent = last?.kind === 'extract' && last.status === 'completed'
       ? 'このコントローラーの役割に該当する変更は見つかりませんでした。'
@@ -293,6 +302,7 @@ async function watch(runId, projectId, epoch) {
       return;
     }
     if (result.run.kind === 'generate') renderResults();
+    else renderExtractionStatus();
     controls();
     refreshIcons();
     setTimeout(() => watch(runId, projectId, epoch), 1200);

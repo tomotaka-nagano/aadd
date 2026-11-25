@@ -1,13 +1,20 @@
 import asyncio
 from collections import defaultdict
 from difflib import unified_diff
+import unicodedata
 
-from aadd.ai import AI
+from aadd.ai import AI, DocumentMasks, document_masks
 from aadd.config import Settings
 from aadd.external import ServiceError
 from aadd.knowledge_base import KnowledgeBase
-from aadd.models import ChangeUpdate, Project, Proposal, Run, identifier
+from aadd.models import Change, ChangeUpdate, Project, Proposal, Run, identifier
 from aadd.storage import Conflict, Store, editable, finish_write
+from aadd.usage import RunUsage, run_usage
+
+
+MAX_REFINEMENT_ROUNDS = 3
+MAX_QUERIES_PER_ROUND = 2
+MAX_SPECIFICATIONS = 6
 
 
 def get_run(project: Project, run_id: str) -> Run:
@@ -85,17 +92,27 @@ class Workflow:
         await self.checkpoint(project, run)
 
     async def execute(self, project: Project, run: Run) -> None:
+        usage = RunUsage()
+        usage_token = run_usage.set(usage)
+        mask_token = document_masks.set(DocumentMasks())
         try:
-            if run.kind == 'extract':
-                await self.extract(project, run)
-            else:
-                await self.generate(project, run)
-        except asyncio.CancelledError:
-            if run.status != 'completed':
-                run.status, run.issues = 'interrupted', ['処理が中断しました。再実行できます。']
-        except Exception as error:
-            run.status, run.issues = 'failed', [self.error_message(error)]
-        await self.checkpoint(project, run)
+            try:
+                if run.kind == 'extract':
+                    await self.extract(project, run)
+                else:
+                    await self.generate(project, run)
+            except asyncio.CancelledError:
+                if run.status != 'completed':
+                    run.status, run.issues = 'interrupted', ['処理が中断しました。再実行できます。']
+            except Exception as error:
+                run.status, run.issues = 'failed', [self.error_message(error)]
+            await self.checkpoint(project, run)
+        finally:
+            document_masks.reset(mask_token)
+            run_usage.reset(usage_token)
+            if run.status == 'running':
+                run.status = 'interrupted'
+            usage.emit(run.id, run.kind, run.status, run.attempt)
 
     @staticmethod
     def error_message(error: Exception) -> str:
@@ -105,18 +122,119 @@ class Workflow:
 
     async def extract(self, project: Project, run: Run) -> None:
         await self.stage(project, run, 'extracting')
-        extracted = await self.ai.extract(project)
-        run.changes = [item.model_copy(update={'id': identifier()}) for item in extracted.changes]
-        run.revision = project.revision + 1
-        run.status, run.stage = 'completed', 'awaiting_confirmation'
+        data = await self.ai.extraction_data(project)
+        draft = await self.ai.plan_extraction(data)
+        if draft.searches:
+            draft = await self.refine_extraction(project, run, data, draft)
+        run.changes = [Change.model_validate({**item.model_dump(exclude={'evidence_ids'}), 'id': identifier()})
+                       for item in draft.changes]
+        revision = project.revision + 1
 
         def apply(current):
-            current.changes, current.revision = run.changes, run.revision
+            current.changes, current.revision = run.changes, revision
             saved = get_run(current, run.id)
             saved.changes, saved.revision = current.changes, current.revision
             saved.status, saved.stage = 'completed', 'awaiting_confirmation'
+            saved.extraction_warnings = run.extraction_warnings
 
-        await finish_write(self.store.update, project.id, apply)
+        try:
+            await finish_write(self.store.update, project.id, apply)
+        except asyncio.CancelledError:
+            run.revision = revision
+            run.status, run.stage = 'completed', 'awaiting_confirmation'
+            raise
+        run.revision = revision
+        run.status, run.stage = 'completed', 'awaiting_confirmation'
+
+    async def refinement_candidates(self, searches, seen_queries: set[str], warnings: list[str]):
+        queries = 0
+        results = []
+        for item in searches:
+            key = unicodedata.normalize('NFKC', ' '.join(item.query.split())).casefold()
+            if key in seen_queries:
+                continue
+            seen_queries.add(key)
+            queries += 1
+            try:
+                query = await self.ai.search_query(item)
+                if not query:
+                    warnings.append('マスクで検出した語や伏せ字を含むなど、安全に送信できない検索語がありました。')
+                else:
+                    documents = await self.kb.search_query(query)
+                    if not documents:
+                        warnings.append('検索に一致する既存仕様が見つかりませんでした。')
+                    results.append([(candidate, query) for candidate in documents])
+            except (ServiceError, ValueError):
+                warnings.append('仕様検索または検索語のマスクに失敗しました。')
+            if queries == MAX_QUERIES_PER_ROUND:
+                break
+        candidates = {}
+        for index in range(max(map(len, results), default=0)):
+            for result in results:
+                if index < len(result):
+                    candidate, query = result[index]
+                    candidates.setdefault(candidate.document_id, (candidate, query))
+        return candidates
+
+    async def refinement_downloads(self, candidates, attempted: set[str], warnings: list[str]):
+        evidence = []
+        limit = min(MAX_SPECIFICATIONS, len(attempted) + 2)
+        for document_id, (candidate, query) in candidates.items():
+            if len(attempted) >= limit:
+                break
+            if document_id in attempted:
+                continue
+            attempted.add(document_id)
+            try:
+                async with self.semaphore:
+                    document = await self.kb.download(candidate)
+            except (ServiceError, ValueError):
+                warnings.append('取得できなかった仕様書があります。')
+                continue
+            try:
+                await self.ai.mask_document(document)
+            except ServiceError:
+                warnings.append('マスクに失敗した仕様書は推敲に使用しませんでした。')
+                continue
+            evidence.append((f'kb_{len(attempted)}', document, query))
+        return evidence
+
+    async def refine_extraction(self, project: Project, run: Run, data, draft):
+        seen_queries, attempted = set(), set()
+        evidence, warnings = [], []
+        for _ in range(MAX_REFINEMENT_ROUNDS):
+            await self.stage(project, run, 'searching_requirements')
+            candidates = await self.refinement_candidates(draft.searches, seen_queries, warnings)
+            found = await self.refinement_downloads(candidates, attempted, warnings)
+            if not found:
+                warnings.append('追加で確認できる既存仕様がありませんでした。')
+                break
+            evidence.extend(found)
+            await self.stage(project, run, 'refining_requirements')
+            try:
+                refined = await self.ai.refine(data, draft, evidence)
+            except ServiceError:
+                warnings.append('仕様のマスクまたは推敲に失敗しました。最後に得られた整理結果を表示します。')
+                break
+            grounded = refined.reviewed_evidence_ids or any(change.evidence_ids for change in refined.changes)
+            if not grounded:
+                if not refined.searches:
+                    warnings.append('確認事項の根拠となる仕様の記載を特定できませんでした。')
+                    break
+                draft = draft.model_copy(update={'searches': refined.searches})
+            else:
+                draft = refined
+                if not draft.searches:
+                    break
+            if len(attempted) >= MAX_SPECIFICATIONS:
+                warnings.append('仕様書の取得上限に達し、追加の確認ができませんでした。')
+                break
+        else:
+            warnings.append('検索と推敲の上限に達し、追加の確認ができませんでした。')
+        if draft.searches:
+            warnings.extend(f'未確認：{item.question}' for item in draft.searches)
+        run.extraction_warnings = list(dict.fromkeys(warnings))
+        return draft
 
     async def generate(self, project: Project, run: Run) -> None:
         for change in run.changes:
@@ -199,6 +317,8 @@ class Workflow:
             if run.status not in {'failed', 'review', 'interrupted'} or run.revision != current.revision:
                 raise Conflict('この実行は再開できません。最新の変更から新しく実行してください。')
             run.status, run.issues = 'running', []
+            run.attempt += 1
+            run.extraction_warnings = []
             run.candidates = {key: value for key, value in run.candidates.items() if value}
 
         project = await asyncio.to_thread(self.store.update, project.id, reset)

@@ -26,6 +26,24 @@ class Extraction(BaseModel):
     changes: list[Change] = Field(max_length=100)
 
 
+class SpecificationSearch(BaseModel):
+    query: str = Field(min_length=1, max_length=160)
+    question: str = Field(min_length=1, max_length=500)
+
+
+class ExtractionPlan(Extraction):
+    searches: list[SpecificationSearch] = Field(default_factory=list, max_length=12)
+
+
+class RefinedChange(Change):
+    evidence_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
+class Refinement(ExtractionPlan):
+    changes: list[RefinedChange] = Field(max_length=100)
+    reviewed_evidence_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
 class MaskPreview(BaseModel):
     message: str
     system_prompt: str
@@ -104,6 +122,8 @@ class Run(BaseModel):
     selections: dict[str, str] = Field(default_factory=dict)
     proposals: dict[str, Proposal] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
+    extraction_warnings: list[str] = Field(default_factory=list)
+    attempt: int = Field(default=1, ge=1)
 
 
 class Project(BaseModel):

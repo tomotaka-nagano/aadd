@@ -1,10 +1,13 @@
 import asyncio
 import hashlib
+import json
 
 import pytest
 
 from aadd.config import Settings
-from aadd.models import Assessment, Candidate, Change, ChangeUpdate, Extraction, Generated, Project, Snapshot
+from aadd.external import ServiceError
+from aadd.models import Assessment, Candidate, Change, ChangeUpdate, Extraction, ExtractionPlan, Generated, Project
+from aadd.models import Refinement, Snapshot, SpecificationSearch
 from aadd.storage import Conflict, Store
 from aadd.workflow import Workflow, choose, markdown_diff, update_changes
 
@@ -21,6 +24,12 @@ class FakeAI:
 
     async def extract(self, project):
         return Extraction(changes=[Change(summary='時間変更', before='1秒', after='2秒')])
+
+    async def extraction_data(self, project):
+        return {'project': project}
+
+    async def plan_extraction(self, data):
+        return ExtractionPlan(changes=(await self.extract(data['project'])).changes)
 
     async def assess(self, change, document):
         self.assessed.append((change.id, document.document_id))
@@ -50,6 +59,84 @@ class FakeKB:
 
 async def finish(engine):
     await asyncio.gather(*list(engine.tasks))
+
+
+def searches(*queries):
+    return [SpecificationSearch(query=query, question=f'{query}の既存仕様を確認') for query in queries]
+
+
+class RefiningAI(FakeAI):
+    def __init__(self):
+        super().__init__()
+        self.rounds = []
+
+    async def plan_extraction(self, data):
+        return ExtractionPlan(changes=[Change(summary='時間変更', after='2秒')], searches=searches('q1', 'q2'))
+
+    async def search_query(self, item):
+        return item.query
+
+    async def mask_document(self, document):
+        pass
+
+    async def refine(self, data, draft, evidence):
+        self.rounds.append([key for key, _, _ in evidence])
+        step = len(self.rounds)
+        return Refinement.model_validate({
+            'changes': [{'summary': '時間変更', 'after': '2秒', 'before': f'{step}秒', 'evidence_ids': [evidence[-1][0]]}],
+            'searches': searches('q1', f'q{step * 2 + 1}', f'q{step * 2 + 2}'),
+        })
+
+
+class RefiningKB(FakeKB):
+    def __init__(self):
+        super().__init__()
+        self.queries = []
+
+    async def search_query(self, query):
+        self.queries.append(query)
+        return [Candidate(document_id=key, file_path=f'{key}.md', title=key, max_score=0.8)
+                for key in [query, 'shared']]
+
+
+async def test_requirement_refinement_has_bounded_rounds_and_does_not_seed_generation(tmp_path, capsys):
+    ai, kb = RefiningAI(), RefiningKB()
+    store = Store(tmp_path)
+    project = store.create(Project(title='Test', request='変更'))
+    engine = Workflow(store, Settings(), ai, kb)
+    run = await engine.start(project.id, 'extract', 0)
+    await finish(engine)
+    saved, result = store.find_run(run.id)
+    assert saved.changes[0].before == '3秒'
+    assert saved.changes[0].after == '2秒'
+    assert kb.queries == ['q1', 'q2', 'q3', 'q4', 'q5', 'q6']
+    assert kb.downloaded == kb.queries
+    assert list(map(len, ai.rounds)) == [2, 4, 6]
+    assert result.extraction_warnings and not result.documents and not result.candidates
+    assert not ai.assessed
+    generation = await engine.start(project.id, 'generate', 1)
+    await finish(engine)
+    assert kb.downloaded[-2:] == ['a', 'b']
+    assert store.find_run(generation.id)[1].status == 'completed'
+    logs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [line['run_id'] for line in logs] == [run.id, generation.id]
+
+
+async def test_requirement_refinement_without_kb_keeps_draft_with_warning(tmp_path):
+    class UnavailableKB(RefiningKB):
+        async def search_query(self, query):
+            raise ServiceError('KB offline')
+
+    ai = RefiningAI()
+    store = Store(tmp_path)
+    project = store.create(Project(title='Test', request='変更'))
+    engine = Workflow(store, Settings(), ai, UnavailableKB())
+    run = await engine.start(project.id, 'extract', 0)
+    await finish(engine)
+    saved, result = store.find_run(run.id)
+    assert saved.changes[0].after == '2秒' and saved.changes[0].before is None
+    assert result.status == 'completed' and any('失敗' in warning for warning in result.extraction_warnings)
+    assert ai.rounds == []
 
 
 async def test_empty_scope_extraction_completes_but_cannot_generate(tmp_path):

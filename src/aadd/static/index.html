@@ -55,7 +55,7 @@
           <p id="mask-status" class="muted" role="status"></p>
           <section id="mask-preview" class="mask-preview" aria-labelledby="mask-preview-heading" hidden>
             <div class="section-heading"><h2 id="mask-preview-heading" tabindex="-1">マスク後の送信内容</h2><button id="close-mask-preview" type="button" class="icon-button" title="プレビューを閉じる" aria-label="プレビューを閉じる"><i data-lucide="x"></i></button></div>
-            <p class="muted">確認用のプレビューです。この操作では変更内容を抽出していません。抽出ボタンを押すと改めてマスクします。入力・役割記述・辞書・検出結果の変化により、送信内容が変わる場合があります。</p>
+            <p class="muted">初回の入力のみを表示します。仕様書の検索や変更内容の抽出は行いません。抽出時は改めてマスクし、後から取得した仕様書を使う場合は、その抜粋もマスクして送信します。</p>
             <h3 id="mask-request-heading">変更要求</h3>
             <pre id="mask-request" class="masked-text" tabindex="0" aria-labelledby="mask-request-heading"></pre>
             <div id="mask-attachments"></div>
@@ -67,7 +67,7 @@
         </section>
         <section id="changes-panel" aria-labelledby="changes-heading" hidden>
           <div class="section-heading"><div><span class="eyebrow">Change items</span><h1 id="changes-heading">変更内容</h1></div><span id="revision" class="metadata"></span></div>
-          <div id="extraction-status" class="empty-state" hidden></div>
+          <div id="extraction-status" class="empty-state" role="status" hidden></div>
           <form id="changes-form">
             <fieldset id="change-fields"><div id="change-list"></div></fieldset>
             <div class="change-actions"><button id="add-change" type="button" class="button secondary"><i data-lucide="plus"></i>変更を追加</button><span id="dirty-state" class="muted" aria-live="polite"></span></div>

@@ -12,9 +12,7 @@ from aadd.storage import Conflict, Store, editable, finish_write
 from aadd.usage import RunUsage, run_usage
 
 
-MAX_REFINEMENT_ROUNDS = 3
 MAX_QUERIES_PER_ROUND = 2
-MAX_SPECIFICATIONS = 6
 
 
 def get_run(project: Project, run_id: str) -> Run:
@@ -178,7 +176,8 @@ class Workflow:
 
     async def refinement_downloads(self, candidates, attempted: set[str], warnings: list[str]):
         evidence = []
-        limit = min(MAX_SPECIFICATIONS, len(attempted) + 2)
+        limit = min(self.settings.refinement_max_documents, len(attempted) +
+                    self.settings.refinement_documents_per_round)
         for document_id, (candidate, query) in candidates.items():
             if len(attempted) >= limit:
                 break
@@ -202,7 +201,7 @@ class Workflow:
     async def refine_extraction(self, project: Project, run: Run, data, draft):
         seen_queries, attempted = set(), set()
         evidence, warnings = [], []
-        for _ in range(MAX_REFINEMENT_ROUNDS):
+        for _ in range(self.settings.refinement_max_rounds):
             await self.stage(project, run, 'searching_requirements')
             candidates = await self.refinement_candidates(draft.searches, seen_queries, warnings)
             found = await self.refinement_downloads(candidates, attempted, warnings)
@@ -226,7 +225,7 @@ class Workflow:
                 draft = refined
                 if not draft.searches:
                     break
-            if len(attempted) >= MAX_SPECIFICATIONS:
+            if len(attempted) >= self.settings.refinement_max_documents:
                 warnings.append('仕様書の取得上限に達し、追加の確認ができませんでした。')
                 break
         else:

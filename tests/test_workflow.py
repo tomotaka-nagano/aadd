@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from aadd.config import Settings
+from aadd.config import Settings, load_settings
 from aadd.external import ServiceError
 from aadd.models import Assessment, Candidate, Change, ChangeUpdate, Extraction, ExtractionPlan, Generated, Project
 from aadd.models import Refinement, Snapshot, SpecificationSearch
@@ -120,6 +120,30 @@ async def test_requirement_refinement_has_bounded_rounds_and_does_not_seed_gener
     assert store.find_run(generation.id)[1].status == 'completed'
     logs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [line['run_id'] for line in logs] == [run.id, generation.id]
+
+
+@pytest.mark.parametrize(('rounds', 'per_round', 'total', 'expected'), [
+    (4, 1, 8, [1, 2, 3, 4]),
+    (4, 3, 5, [3, 5]),
+])
+async def test_requirement_refinement_obeys_toml_limits(tmp_path, monkeypatch, rounds, per_round, total, expected):
+    config = tmp_path / 'config.toml'
+    config.write_text(
+        f'refinement_max_rounds = {rounds}\n'
+        f'refinement_documents_per_round = {per_round}\n'
+        f'refinement_max_documents = {total}\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('AADD_CONFIG', str(config))
+    ai, kb = RefiningAI(), RefiningKB()
+    store = Store(tmp_path)
+    project = store.create(Project(title='Test', request='変更'))
+    engine = Workflow(store, load_settings(), ai, kb)
+    run = await engine.start(project.id, 'extract', 0)
+    await finish(engine)
+    assert store.find_run(run.id)[1].status == 'completed'
+    assert list(map(len, ai.rounds)) == expected
+    assert len(kb.downloaded) == expected[-1]
 
 
 async def test_requirement_refinement_without_kb_keeps_draft_with_warning(tmp_path):

@@ -24,6 +24,9 @@ class Settings(BaseModel):
     exclude_paths: list[str] = Field(default_factory=list)
     search_mode: Literal['hybrid', 'semantic', 'keyword'] = 'hybrid'
     candidate_limit: int = Field(default=5, ge=1, le=50)
+    refinement_max_rounds: int = Field(default=3, ge=1, strict=True)
+    refinement_documents_per_round: int = Field(default=2, ge=1, strict=True)
+    refinement_max_documents: int = Field(default=6, ge=1, strict=True)
     necessity_threshold: float = Field(default=0.5, ge=0, le=1)
     timeout_seconds: float = Field(default=180, gt=0)
     retry_count: int = Field(default=1, ge=0, le=5)

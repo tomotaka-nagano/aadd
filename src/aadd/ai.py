@@ -63,17 +63,17 @@ QUESTION = (
 
 @dataclass
 class DocumentMasks:
-    results: dict[str, MaskResult] = field(default_factory=dict)
+    results: dict[tuple[str, bool], MaskResult] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 document_masks: ContextVar[DocumentMasks | None] = ContextVar('document_masks', default=None)
 
 
-def excerpt(text: str, query: str, labels: list[str]) -> tuple[int, str]:
+def excerpt(text: str, query: str, labels: list[str]) -> str:
     lines = text.splitlines()
     if not lines:
-        return 1, ''
+        return ''
     terms = [term.casefold() for term in re.findall(r'[\w-]+', query) if len(term) >= 2]
     pairs = {term[i:i + 2] for term in terms for i in range(len(term) - 1)}
 
@@ -91,7 +91,7 @@ def excerpt(text: str, query: str, labels: list[str]) -> tuple[int, str]:
             if 0 <= pos < end < pos + len(label):
                 end = pos
         snippet = snippet[:end]
-    return start + 1, snippet
+    return snippet
 
 
 @lru_cache(maxsize=1)
@@ -199,7 +199,8 @@ class AI:
                 message, instruction, mapping, references = await self.refinement_input(
                     data, instruction, evidence, client, schema_text)
             else:
-                message, instruction, mapping = await self.model_input(data, instruction, document)
+                message, instruction, mapping = await self.model_input(
+                    data, instruction, document, preserve_format=document is not None)
                 references = {}
             await self.budget(message + instruction + schema_text, client)
 
@@ -220,21 +221,29 @@ class AI:
         texts = [part.masked_text for part in masked.masked_parts]
         return encode_data(replace_strings(data, iter(texts[:-1]))), texts[-1], masked
 
-    async def mask_document(self, document: Snapshot) -> MaskResult:
+    async def mask_document(self, document: Snapshot, *, preserve_format: bool = False) -> MaskResult:
+        async def mask():
+            if preserve_format:
+                return await self.redactor.mask([document.text])
+            return await self.redactor.mask_markdown(document.text)
+
         cache = document_masks.get()
         if cache is None:
-            return await self.redactor.mask([document.text])
+            return await mask()
+        key = (document.sha256, preserve_format)
         async with cache.lock:
-            if document.sha256 not in cache.results:
-                cache.results[document.sha256] = await self.redactor.mask([document.text])
-            return cache.results[document.sha256]
+            if key not in cache.results:
+                cache.results[key] = await mask()
+            return cache.results[key]
 
-    async def model_input(self, data: dict, instruction: str, document: Snapshot | None):
+    async def model_input(self, data: dict, instruction: str, document: Snapshot | None, *,
+                          preserve_format: bool = False):
         if document is None:
             message, instruction, masked = await self.mask_input(data, instruction)
             return message, instruction, masked.mapping
         context = await self.redactor.mask([*strings(data), instruction])
-        context, spec = merge_masks([context, await self.mask_document(document)])
+        spec = await self.mask_document(document, preserve_format=preserve_format)
+        context, spec = merge_masks([context, spec])
         texts = [part.masked_text for part in context.masked_parts]
         payload = replace_strings(data, iter(texts[:-1]))
         payload['specification'] = spec.masked_parts[0].masked_text
@@ -251,14 +260,14 @@ class AI:
         mapping = [entry for result in results for entry in result.mapping]
         labels = [str(entry['placeholder']) for entry in mapping]
         for (key, document, query), result in zip(evidence, results[1:], strict=True):
-            line, text = excerpt(result.masked_parts[0].masked_text, query, labels)
+            text = excerpt(result.masked_parts[0].masked_text, query, labels)
             if not text.strip():
                 continue
             item = {'id': key, 'excerpt': text}
             message = encode_data({**payload, 'evidence': [*snippets, item]})
             if await self.fits(message + instruction + schema_text, client):
                 snippets.append(item)
-                references[key] = f'{document.file_path}:{line}行付近（現行仕様）'
+                references[key] = f'{document.file_path}（現行仕様）'
         if not snippets:
             raise ServiceError('入力上限内で参照できる仕様の抜粋がありません。')
         message = encode_data({**payload, 'evidence': snippets})

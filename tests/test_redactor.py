@@ -1,4 +1,6 @@
 import asyncio
+from email import policy
+from email.parser import BytesParser
 import json
 
 import httpx
@@ -7,6 +9,38 @@ import pytest
 from aadd.config import Settings
 from aadd.external import ServiceError
 from aadd.redactor import Redactor, replace_strings, strings
+
+
+def read_markdown_upload(request):
+    content_type = request.headers['Content-Type']
+    assert content_type.startswith('multipart/form-data;')
+    message = BytesParser(policy=policy.default).parsebytes(
+        f'Content-Type: {content_type}\r\n\r\n'.encode('ascii') + request.content
+    )
+    fields = {part.get_param('name', header='Content-Disposition'): part for part in message.iter_parts()}
+    assert set(fields) == {'manifest', '0'}
+    manifest = json.loads(fields['manifest'].get_payload(decode=True))
+    assert manifest['parts'] == [{'id': '0', 'file': {'filename': 'specification.md'}}]
+    assert fields['0'].get_filename() == 'specification.md'
+    assert fields['0'].get_content_type() == 'text/markdown'
+    return manifest, fields['0'].get_payload(decode=True)
+
+
+async def test_markdown_mask_uploads_utf8_file_with_no_layout_changes_to_request():
+    text = '# 仕様\r\n\r\n- 設定値\r\n'
+
+    def handler(request):
+        assert request.url.path == '/mask'
+        assert request.headers['Authorization'] == 'Bearer test'
+        manifest, content = read_markdown_upload(request)
+        assert content == text.encode('utf-8')
+        assert (manifest['detection'], manifest['mask_level']) == ('ner', 'weak')
+        return httpx.Response(200, json={'masked_parts': [{'id': '0', 'masked_text': '# [文書1]'}], 'mapping': []})
+
+    settings = Settings(redactor_headers={'Authorization': 'Bearer test', 'Content-Type': 'application/json'},
+                        redactor_detection='ner', redactor_mask_level='weak', retry_count=0)
+    result = await Redactor(settings, httpx.MockTransport(handler)).mask_markdown(text)
+    assert result.masked_parts[0].masked_text == '# [文書1]'
 
 
 def test_string_replacement_preserves_json_shape():

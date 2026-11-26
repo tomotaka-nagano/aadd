@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+import json
 import re
 from typing import TypeVar
 
@@ -91,21 +92,37 @@ class Redactor:
         self.settings = settings
         self.transport = transport
 
-    async def post(self, endpoint: str, payload: dict, schema: type[Response]) -> Response:
+    async def post(self, endpoint: str, payload: dict, schema: type[Response], *,
+                   files: dict[str, tuple[str, bytes, str]] | None = None) -> Response:
         async def operation():
             async with httpx.AsyncClient(timeout=self.settings.timeout_seconds, transport=self.transport) as client:
-                response = await client.post(self.settings.redactor_url.rstrip('/') + endpoint, json=payload,
-                                             headers=self.settings.redactor_headers)
+                url = self.settings.redactor_url.rstrip('/') + endpoint
+                headers = httpx.Headers(self.settings.redactor_headers)
+                if files is None:
+                    response = await client.post(url, json=payload, headers=headers)
+                else:
+                    headers.pop('content-type', None)
+                    response = await client.post(url, data={'manifest': json.dumps(payload)}, files=files,
+                                                 headers=headers)
                 response.raise_for_status()
                 return schema.model_validate(response.json())
 
         return await call_service(operation, self.settings, 'マスクAPIの処理')
 
     async def mask(self, texts: list[str]) -> MaskResult:
-        parts = [{'id': str(index), 'text': text} for index, text in enumerate(texts)]
+        parts: list[dict[str, JsonValue]] = [{'id': str(index), 'text': text} for index, text in enumerate(texts)]
+        return await self.mask_parts(parts)
+
+    async def mask_markdown(self, text: str) -> MaskResult:
+        filename = 'specification.md'
+        parts: list[dict[str, JsonValue]] = [{'id': '0', 'file': {'filename': filename}}]
+        return await self.mask_parts(parts, files={'0': (filename, text.encode('utf-8'), 'text/markdown')})
+
+    async def mask_parts(self, parts: list[dict[str, JsonValue]], *,
+                         files: dict[str, tuple[str, bytes, str]] | None = None) -> MaskResult:
         payload = {'parts': parts, 'detection': self.settings.redactor_detection,
                    'mask_level': self.settings.redactor_mask_level}
-        result = await self.post('/mask', payload, MaskResult)
+        result = await self.post('/mask', payload, MaskResult, files=files)
         if [part.id for part in result.masked_parts] != [part['id'] for part in parts]:
             raise ServiceError('マスクAPIの応答に入力と対応しないパートがあります。')
         return result

@@ -36,8 +36,8 @@ AI のモデル名はアプリ設定と exmgai 設定で一致させてくださ
 | `redactor_url` / `redactor_headers` | data-redactor API の URL（既定 `http://127.0.0.1:8509`）と必要に応じた認証ヘッダー |
 | `redactor_detection` | 検出方法。`ner` / `llm` / `both`（既定 `both`） |
 | `redactor_mask_level` | 自動マスクの下限。`certain` / `strong` / `medium` / `weak` / `faint`（既定 `strong`） |
-| `scope_paths` / `exclude_paths` | 検索対象・除外パス |
-| `candidate_limit` | 変更ごとの検索候補数。既定5件 |
+| `scope_paths` / `exclude_paths` | 検索対象・除外パス。設定例では `仕様/` 配下を検索 |
+| `candidate_limit` | 変更ごとの KB 検索候補数（拡張子で絞る前）。既定5件 |
 | `refinement_max_rounds` | 要求整理の最大ラウンド数。既定3回 |
 | `refinement_documents_per_round` | 要求整理の1ラウンドあたりの仕様書取得上限。既定2件 |
 | `refinement_max_documents` | 要求整理の1実行あたりの仕様書取得上限。既定6件 |
@@ -65,8 +65,10 @@ uv run kb-mcp-server --transport http --host 127.0.0.1 --port 8000
 リバースプロキシ配下では `https://example.test/kb/mcp` のように完全なエンドポイントを指定します。
 
 公式 Python MCP SDK でセッションを初期化し、`search_documents` と `download_document` を呼び出します。
-原文はリソースのチャンク再構成ではなく、`download_document` で取得します。
-検索フィルター、Markdown の限定・重複排除、原文ハッシュ、タイムアウト・再試行は維持します。
+検索結果から `.xlsx` のみを残し、同じ文書 ID の重複を除きます。
+`download_document` で Excel 原本を Base64 として取得し、MarkItDown でシートを Markdown の表に変換します。
+以降は変換後の Markdown を仕様書本文として扱い、その内容からハッシュを計算します。
+タイムアウト・再試行は従来どおりです。
 呼出しごとにセッションを開閉するため、再試行時も新しいセッションで接続します。
 
 ### 対象コントローラーの役割
@@ -111,7 +113,7 @@ API 呼出しには `timeout_seconds` と `retry_count` を適用します。
 アプリに候補の手動レビュー機能はないため、必要に応じて下限を下げ、サーバー側の辞書も整備してください。
 `both` / `llm` はマスクサーバー側で検出用 LLM の準備・認証が必要です。
 検出用 LLM は原文を受け取るため、機密情報を入力してよい接続先に限定してください。
-要求整理と必要性判断では、KB-MCP から取得した Markdown 全文を UTF-8 の `.md` ファイルとして
+要求整理と必要性判断では、KB-MCP から取得した Excel を変換した Markdown 全文を UTF-8 の `.md` ファイルとして
 1文書ずつ `multipart/form-data` で `POST /mask` に渡します。アップロード名は `specification.md` 固定で、
 KB 上のファイル名やパスは送信しません。要求整理にはマスク後の抜粋を使い、API のチャンク化で行番号が
 変わり得るため、出典には元の仕様書名だけを示します。必要性判断にはマスクされた文書全体を使います。
@@ -162,7 +164,7 @@ http://127.0.0.1:8001 を開きます。ポートが使用中なら `--port` を
    変更前・変更後・出典・不明点を確認し、項目を編集・追加・削除します。
 3. 「確定して修正案を作成」で、要求整理とは独立して、検索・必要性判断・修正案生成を自動実行します。
 4. 対象仕様書ごとの原文・修正文・差分、変更ごとの候補と必要性を確認します。
-5. 修正文・差分をダウンロードできます。KB や元仕様書は更新しません。
+5. Markdown の修正文・差分をダウンロードできます。差分は変換後の Markdown が対象で、KB や Excel 原本は更新しません。
 
 同じ仕様書に関係する変更は、まとめて1件の修正案に反映します。
 判断 AI には候補 Markdown の全文を渡し、`NoulAnswer.noul` の必要性確率を比較します。

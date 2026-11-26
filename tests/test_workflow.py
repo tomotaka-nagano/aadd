@@ -259,6 +259,12 @@ def test_diff_handles_missing_newline():
     assert '-old\n\\ No newline at end of file\n+new\n' in diff
 
 
+def test_xlsx_specification_diff_targets_converted_markdown():
+    diff = markdown_diff('| 変更前 |\n', '| 変更後 |\n', '仕様/機能.XLSX')
+    assert diff.startswith('--- a/仕様/機能.md\n+++ b/仕様/機能.md\n')
+    assert '-| 変更前 |\n+| 変更後 |\n' in diff
+
+
 async def test_restart_and_stale_retry(tmp_path):
     class BrokenAI(FakeAI):
         async def extract(self, project):

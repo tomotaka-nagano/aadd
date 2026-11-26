@@ -1,6 +1,7 @@
 import asyncio
 from collections import defaultdict
 from difflib import unified_diff
+from pathlib import PurePosixPath
 import unicodedata
 
 from aadd.ai import AI, DocumentMasks, document_masks
@@ -20,6 +21,8 @@ def get_run(project: Project, run_id: str) -> Run:
 
 
 def markdown_diff(original: str, modified: str, path: str) -> str:
+    if PurePosixPath(path).suffix.lower() == '.xlsx':
+        path = str(PurePosixPath(path).with_suffix('.md'))
     lines = unified_diff(original.splitlines(keepends=True), modified.splitlines(keepends=True),
                          fromfile=f'a/{path}', tofile=f'b/{path}')
     return ''.join(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n' for line in lines)

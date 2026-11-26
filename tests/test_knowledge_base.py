@@ -2,10 +2,12 @@ import asyncio
 import base64
 import hashlib
 import json
+from io import BytesIO
 
 import httpx
 import pytest
 from mcp.server.fastmcp import FastMCP
+from openpyxl import Workbook
 
 from aadd.config import Settings
 from aadd.external import ServiceError
@@ -13,7 +15,20 @@ from aadd.knowledge_base import KnowledgeBase
 from aadd.models import Candidate, Change
 
 
-CANDIDATE = Candidate(document_id='a', file_path='spec.md', title='Spec', max_score=0.8)
+CANDIDATE = Candidate(document_id='a', file_path='仕様/spec.XLSX', title='Spec', max_score=0.8)
+
+
+@pytest.fixture
+def workbook_base64():
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = '機能仕様'
+    sheet.append(['項目', '仕様'])
+    sheet.append(['停止', '変更前'])
+    with BytesIO() as stream:
+        workbook.save(stream)
+        return base64.b64encode(stream.getvalue()).decode('ascii')
 
 
 def protocol_transport(data, *, structured=True, is_error=False):
@@ -50,10 +65,11 @@ def protocol_transport(data, *, structured=True, is_error=False):
 async def test_search_uses_mcp_and_preserves_filters(url, structured):
     item = CANDIDATE.model_dump()
     transport, requests = protocol_transport({'documents': [
-        item, {**item, 'max_score': 0.9}, {**item, 'document_id': 'b', 'file_path': 'x.pdf'},
+        item, {**item, 'max_score': 0.9}, {**item, 'document_id': 'b', 'file_path': '仕様/old.md'},
+        {**item, 'document_id': 'c', 'file_path': '仕様/x.xls'},
     ]}, structured=structured)
-    settings = Settings(kb_url=url, kb_headers={'Authorization': 'Bearer test'}, scope_paths=['specs/'],
-                        exclude_paths=['specs/old/'], search_mode='semantic', candidate_limit=3)
+    settings = Settings(kb_url=url, kb_headers={'Authorization': 'Bearer test'}, scope_paths=['仕様/'],
+                        exclude_paths=['仕様/旧版/'], search_mode='semantic', candidate_limit=3)
     result = await KnowledgeBase(settings, transport).search(Change(summary='変更', before='前', after='後'))
     assert len(result) == 1
     assert result[0].max_score == 0.9
@@ -65,25 +81,42 @@ async def test_search_uses_mcp_and_preserves_filters(url, structured):
     call = next(message for message in messages if message['method'] == 'tools/call')
     assert call['params'] == {'name': 'search_documents', 'arguments': {
         'query': '変更\n前\n後', 'limit': 3, 'mode': 'semantic',
-        'scope_paths': ['specs/'], 'exclude_paths': ['specs/old/'],
+        'scope_paths': ['仕様/'], 'exclude_paths': ['仕様/旧版/'],
     }}
     assert all(request.headers['mcp-session-id'] == 'test-session' for request in requests[1:])
     assert requests[-1].method == 'DELETE'
 
 
-@pytest.mark.parametrize('encoding', ['text', 'base64'])
-async def test_download_original_markdown(encoding):
-    text = '# 仕様\n変更前\n'
-    content = text if encoding == 'text' else base64.b64encode(text.encode()).decode()
-    transport, requests = protocol_transport({'status': 'success', 'content': content, 'encoding': encoding})
+async def test_download_converts_xlsx_into_markdown(workbook_base64):
+    transport, requests = protocol_transport(
+        {'status': 'success', 'content': workbook_base64, 'encoding': 'base64'})
     snapshot = await KnowledgeBase(Settings(), transport).download(CANDIDATE)
-    assert snapshot.text == text
-    assert snapshot.sha256 == hashlib.sha256(text.encode()).hexdigest()
+    assert snapshot.file_path == CANDIDATE.file_path
+    assert '## 機能仕様' in snapshot.text
+    assert '| 停止 | 変更前 |' in snapshot.text
+    assert snapshot.sha256 == hashlib.sha256(snapshot.text.encode()).hexdigest()
     messages = [json.loads(request.content) for request in requests if request.method == 'POST']
     call = next(message for message in messages if message['method'] == 'tools/call')
     assert call['params'] == {'name': 'download_document', 'arguments': {
-        'document_id': 'a', 'encoding': 'text', 'include_images': False,
+        'document_id': 'a', 'encoding': 'base64', 'include_images': False,
     }}
+
+
+@pytest.mark.parametrize('encoding, content', [('text', '# 仕様'), ('base64', '%%%'), ('base64', 'bm90IHppcA==')])
+async def test_download_rejects_non_xlsx_content(encoding, content):
+    transport, _ = protocol_transport({'status': 'success', 'content': content, 'encoding': encoding})
+    with pytest.raises(ServiceError):
+        await KnowledgeBase(Settings(), transport).download(CANDIDATE)
+
+
+@pytest.mark.parametrize('limit, message', [
+    ({'max_file_bytes': 3}, 'ファイルサイズ'),
+    ({'max_document_chars': 3}, '文字数上限'),
+])
+async def test_download_rejects_oversized_xlsx(workbook_base64, limit, message):
+    transport, _ = protocol_transport({'status': 'success', 'content': workbook_base64, 'encoding': 'base64'})
+    with pytest.raises(ServiceError, match=message):
+        await KnowledgeBase(Settings(**limit), transport).download(CANDIDATE)
 
 
 @pytest.mark.parametrize('data, is_error', [
@@ -131,7 +164,7 @@ async def test_timeout_is_an_explicit_failure():
 
 
 @pytest.mark.parametrize('json_response', [True, False])
-async def test_roundtrip_with_real_fastmcp(json_response):
+async def test_roundtrip_with_real_fastmcp(json_response, workbook_base64):
     server = FastMCP('kb-mcp-test', stateless_http=True, json_response=json_response)
 
     @server.tool()
@@ -142,12 +175,12 @@ async def test_roundtrip_with_real_fastmcp(json_response):
 
     @server.tool()
     async def download_document(document_id: str, encoding: str, include_images: bool) -> dict:
-        assert (document_id, encoding, include_images) == ('a', 'text', False)
-        return {'status': 'success', 'content': '# 仕様\n原文\n', 'encoding': encoding}
+        assert (document_id, encoding, include_images) == ('a', 'base64', False)
+        return {'status': 'success', 'content': workbook_base64, 'encoding': encoding}
 
     app = server.streamable_http_app()
     async with app.router.lifespan_context(app):
         kb = KnowledgeBase(Settings(), httpx.ASGITransport(app=app))
         candidates = await kb.search(Change(summary='変更'))
         assert candidates == [CANDIDATE]
-        assert (await kb.download(candidates[0])).text == '# 仕様\n原文\n'
+        assert '| 停止 | 変更前 |' in (await kb.download(candidates[0])).text

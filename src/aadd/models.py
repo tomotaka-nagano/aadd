@@ -84,6 +84,7 @@ class Snapshot(BaseModel):
     file_path: str
     text: str
     sha256: str
+    redactor_content_hash: str | None = None
 
 
 class Assessment(BaseModel):

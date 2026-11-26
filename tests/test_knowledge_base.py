@@ -2,6 +2,8 @@ import asyncio
 import base64
 import hashlib
 import json
+from email import policy
+from email.parser import BytesParser
 from io import BytesIO
 
 import httpx
@@ -13,9 +15,12 @@ from aadd.config import Settings
 from aadd.external import ServiceError
 from aadd.knowledge_base import KnowledgeBase
 from aadd.models import Candidate, Change
+from aadd.redactor import Redactor
 
 
 CANDIDATE = Candidate(document_id='a', file_path='仕様/spec.XLSX', title='Spec', max_score=0.8)
+CONTENT_HASH = 'a' * 64
+CONVERTED_CHUNKS = ['| 項目 | 仕様 |\n|---|---|', '| 停止 | 変更前 |']
 
 
 @pytest.fixture
@@ -29,6 +34,26 @@ def workbook_base64():
     with BytesIO() as stream:
         workbook.save(stream)
         return base64.b64encode(stream.getvalue()).decode('ascii')
+
+
+@pytest.fixture
+def conversion_api(workbook_base64):
+    requests = []
+
+    def handler(request):
+        requests.append((request.method, request.url.path))
+        if request.method == 'POST':
+            header = f'Content-Type: {request.headers["Content-Type"]}\r\n\r\n'
+            form = BytesParser(policy=policy.default).parsebytes(header.encode('ascii') + request.content)
+            file, = form.iter_parts()
+            assert file.get_param('name', header='Content-Disposition') == 'file'
+            assert file.get_filename() == 'spec.XLSX'
+            assert file.get_payload(decode=True) == base64.b64decode(workbook_base64)
+            return httpx.Response(200, json={'content_hash': CONTENT_HASH})
+        assert request.url.path == f'/documents/{CONTENT_HASH}'
+        return httpx.Response(200, json={'content_hash': CONTENT_HASH, 'chunks': CONVERTED_CHUNKS})
+
+    return httpx.MockTransport(handler), requests
 
 
 def protocol_transport(data, *, structured=True, is_error=False):
@@ -87,13 +112,17 @@ async def test_search_uses_mcp_and_preserves_filters(url, structured):
     assert requests[-1].method == 'DELETE'
 
 
-async def test_download_converts_xlsx_into_markdown(workbook_base64):
+async def test_download_uses_markdown_converted_by_redactor(workbook_base64, conversion_api):
     transport, requests = protocol_transport(
         {'status': 'success', 'content': workbook_base64, 'encoding': 'base64'})
-    snapshot = await KnowledgeBase(Settings(), transport).download(CANDIDATE)
+    redactor_transport, conversions = conversion_api
+    settings = Settings(retry_count=0)
+    redactor = Redactor(settings, redactor_transport)
+    snapshot = await KnowledgeBase(settings, transport, redactor=redactor).download(CANDIDATE)
     assert snapshot.file_path == CANDIDATE.file_path
-    assert '## 機能仕様' in snapshot.text
-    assert '| 停止 | 変更前 |' in snapshot.text
+    assert snapshot.text == '\n\n'.join(CONVERTED_CHUNKS)
+    assert snapshot.redactor_content_hash == CONTENT_HASH
+    assert conversions == [('POST', '/documents'), ('GET', f'/documents/{CONTENT_HASH}')]
     assert snapshot.sha256 == hashlib.sha256(snapshot.text.encode()).hexdigest()
     messages = [json.loads(request.content) for request in requests if request.method == 'POST']
     call = next(message for message in messages if message['method'] == 'tools/call')
@@ -113,10 +142,12 @@ async def test_download_rejects_non_xlsx_content(encoding, content):
     ({'max_file_bytes': 3}, 'ファイルサイズ'),
     ({'max_document_chars': 3}, '文字数上限'),
 ])
-async def test_download_rejects_oversized_xlsx(workbook_base64, limit, message):
+async def test_download_rejects_oversized_xlsx(workbook_base64, conversion_api, limit, message):
     transport, _ = protocol_transport({'status': 'success', 'content': workbook_base64, 'encoding': 'base64'})
+    settings = Settings(retry_count=0, **limit)
+    redactor = Redactor(settings, conversion_api[0])
     with pytest.raises(ServiceError, match=message):
-        await KnowledgeBase(Settings(**limit), transport).download(CANDIDATE)
+        await KnowledgeBase(settings, transport, redactor=redactor).download(CANDIDATE)
 
 
 @pytest.mark.parametrize('data, is_error', [
@@ -164,7 +195,7 @@ async def test_timeout_is_an_explicit_failure():
 
 
 @pytest.mark.parametrize('json_response', [True, False])
-async def test_roundtrip_with_real_fastmcp(json_response, workbook_base64):
+async def test_roundtrip_with_real_fastmcp(json_response, workbook_base64, conversion_api):
     server = FastMCP('kb-mcp-test', stateless_http=True, json_response=json_response)
 
     @server.tool()
@@ -180,7 +211,8 @@ async def test_roundtrip_with_real_fastmcp(json_response, workbook_base64):
 
     app = server.streamable_http_app()
     async with app.router.lifespan_context(app):
-        kb = KnowledgeBase(Settings(), httpx.ASGITransport(app=app))
+        settings = Settings(retry_count=0)
+        kb = KnowledgeBase(settings, httpx.ASGITransport(app=app), redactor=Redactor(settings, conversion_api[0]))
         candidates = await kb.search(Change(summary='変更'))
         assert candidates == [CANDIDATE]
         assert '| 停止 | 変更前 |' in (await kb.download(candidates[0])).text

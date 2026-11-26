@@ -22,7 +22,8 @@ def read_redactor_request(request):
     if not request.headers['Content-Type'].startswith('multipart/form-data'):
         return json.loads(request.content)
     manifest, file = read_markdown_upload(request)
-    return {**manifest, 'upload': file, 'parts': [{'id': '0', 'text': file.decode('utf-8')}]}
+    return {**manifest, 'upload': file, 'upload_name': manifest['parts'][0]['file']['filename'],
+            'parts': [{'id': '0', 'text': file.decode('utf-8')}]}
 
 
 @pytest.fixture(autouse=True)
@@ -255,7 +256,8 @@ async def test_generate_masks_specification_and_restores_full_markdown(monkeypat
     }))
     client = SimpleNamespace(context_window=128000, max_output_tokens=16000, chat=SimpleNamespace(create=method))
     monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
-    result = await ai.generate([change], Snapshot(document_id='a', file_path='a.md', text=secret, sha256='hash'))
+    document = Snapshot(document_id='a', file_path='仕様/停止制御.v2.xlsx', text=secret, sha256='hash')
+    result = await ai.generate([change], document)
     data = json.loads(method.call_args.args[0])
     assert data['specification'] == data['changes'][0]['before'] == '[社1]'
     assert secret not in str(method.call_args)
@@ -263,8 +265,8 @@ async def test_generate_masks_specification_and_restores_full_markdown(monkeypat
     assert result.summary == '秘密社の変更'
     assert result.change_ids == ['c1']
     document_input = [body for path, body in requests if path == '/mask'][1]
-    assert document_input['parts'] == [{'id': '0', 'text': secret}]
-    assert 'upload' not in document_input
+    assert document_input['upload_name'] == '停止制御.v2.md'
+    assert document_input['upload'] == secret.encode('utf-8')
 
 
 async def test_decision_masks_inputs_without_unmasking(monkeypatch):
@@ -275,17 +277,45 @@ async def test_decision_masks_inputs_without_unmasking(monkeypatch):
     method = AsyncMock(return_value=response)
     client = SimpleNamespace(context_window=128000, decision=SimpleNamespace(system_one=method))
     monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
-    document = Snapshot(document_id='a', file_path='a.md', text='秘密社', sha256='hash')
+    document = Snapshot(document_id='a', file_path=r'仕様\起動制御.XLSX', text='秘密社', sha256='hash')
     result = await ai.assess(Change(summary='秘密社'), document)
     data = json.loads(method.call_args.args[0])
     assert data['change']['summary'] == data['specification'] == '[社1]'
     assert '秘密社' not in str(method.call_args)
     assert result.score == 0.91
     assert [path for path, _ in requests] == ['/mask', '/mask']
+    assert requests[1][1]['upload_name'] == '起動制御.md'
     assert requests[1][1]['upload'] == '秘密社'.encode('utf-8')
 
 
-async def test_failed_markdown_upload_prevents_decision_call(monkeypatch):
+async def test_server_converted_document_is_masked_by_reference_and_reused():
+    ai = AI(Settings(retry_count=0))
+    content_hash = 'b' * 64
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body['parts'])
+        return httpx.Response(200, json={
+            'masked_parts': [{'id': '0', 'masked_text': '| [社1] |'}], 'mapping': [],
+        })
+
+    ai.redactor = Redactor(ai.settings, httpx.MockTransport(handler))
+    doc = Snapshot(document_id='d', file_path='仕様/制御.xlsx', text='| 秘密社 |', sha256='hash',
+                   redactor_content_hash=content_hash)
+    token = document_masks.set(DocumentMasks())
+    try:
+        first = await ai.mask_document(doc)
+        second = await ai.mask_document(doc)
+    finally:
+        document_masks.reset(token)
+    assert first == second
+    assert first.masked_parts[0].masked_text == '| [社1] |'
+    assert calls == [[{'id': '0', 'content_hash': content_hash}]]
+
+
+@pytest.mark.parametrize('operation', ['assess', 'generate'])
+async def test_failed_markdown_upload_prevents_model_call(monkeypatch, operation):
     ai = AI(Settings(retry_count=0))
     calls = []
 
@@ -301,23 +331,28 @@ async def test_failed_markdown_upload_prevents_decision_call(monkeypatch):
 
     ai.redactor = Redactor(ai.settings, httpx.MockTransport(handler))
     method = AsyncMock()
-    client = SimpleNamespace(context_window=128000, decision=SimpleNamespace(system_one=method))
+    client = SimpleNamespace(context_window=128000, max_output_tokens=16000,
+                             chat=SimpleNamespace(create=method), decision=SimpleNamespace(system_one=method))
     monkeypatch.setattr(ai, 'client', AsyncMock(return_value=client))
     document = Snapshot(document_id='a', file_path='a.md', text='# 仕様', sha256='hash')
     with pytest.raises(ServiceError, match='マスクAPI'):
-        await ai.assess(Change(summary='変更'), document)
+        change = Change(summary='変更')
+        if operation == 'generate':
+            await ai.generate([change], document)
+        else:
+            await ai.assess(change, document)
     assert len(calls) == 2 and calls[1]['upload'] == document.text.encode('utf-8')
     method.assert_not_awaited()
 
 
-async def test_standalone_document_mask_is_reused_and_conflicting_labels_restore(monkeypatch, redaction_api):
+async def test_standalone_document_mask_is_reused_and_conflicting_labels_restore(monkeypatch):
     ai = AI(Settings())
     batches = []
 
     def handler(request):
         body = read_redactor_request(request)
         if request.url.path == '/mask':
-            batches.append((body['parts'], 'upload' in body))
+            batches.append((body['parts'], body.get('upload_name')))
             text = '文書の社名' if body['parts'] == [{'id': '0', 'text': '文書の社名'}] else '要求の社名'
             return httpx.Response(200, json={
                 'masked_parts': [{'id': p['id'], 'masked_text': p['text'].replace(text, '[社1]')}
@@ -349,10 +384,13 @@ async def test_standalone_document_mask_is_reused_and_conflicting_labels_restore
         await ai.assess(change, doc)
         await ai.assess(change, doc)
         result = await ai.generate([change], doc)
+        await ai.assess(change, doc.model_copy(update={'file_path': '仕様/別仕様.xlsx'}))
     finally:
         document_masks.reset(token)
-    assert batches.count(([{'id': '0', 'text': '文書の社名'}], True)) == 1
-    assert batches.count(([{'id': '0', 'text': '文書の社名'}], False)) == 1
+    assert [(batch, name) for batch, name in batches if name is not None] == [
+        ([{'id': '0', 'text': '文書の社名'}], 'd.md'),
+        ([{'id': '0', 'text': '文書の社名'}], '別仕様.md'),
+    ]
     assert all(not any(part['text'] == '文書の社名' for part in batch)
                for batch, _ in batches if len(batch) > 1)
     assert (result.modified, result.summary) == ('文書の社名', '要求の社名')
@@ -404,7 +442,9 @@ async def test_refine_sends_masked_excerpt_and_resolves_valid_evidence(monkeypat
     assert result.changes[0].before == '1秒' and result.changes[0].after == '2秒'
     assert result.changes[0].sources[0] == '変更要求'
     assert result.changes[0].sources[1] == '秘密社.md（現行仕様）'
-    assert [body for path, body in requests if path == '/mask'][1]['upload'] == document.text.encode('utf-8')
+    document_input = [body for path, body in requests if path == '/mask'][1]
+    assert document_input['upload_name'] == '秘密社.md'
+    assert document_input['upload'] == document.text.encode('utf-8')
 
 
 async def test_refine_rejects_unsent_document_reference(monkeypatch, role_settings):
@@ -465,14 +505,15 @@ async def test_masked_input_budget_is_checked_before_model_call(monkeypatch, ope
         return MaskResult(masked_parts=parts, mapping=[])
 
     monkeypatch.setattr(ai.redactor, 'mask', AsyncMock(side_effect=mask))
-    monkeypatch.setattr(ai.redactor, 'mask_markdown', AsyncMock(side_effect=lambda text: mask([text])))
+    monkeypatch.setattr(ai.redactor, 'mask_markdown', AsyncMock(side_effect=lambda text, *, filename: mask([text])))
     document = Snapshot(document_id='a', file_path='a.md', text='仕様', sha256='hash')
     with pytest.raises(ServiceError, match='トークン上限'):
         if operation == 'generate':
             await ai.generate([Change(summary='変更')], document)
         else:
             await ai.assess(Change(summary='変更'), document)
-    assert ai.redactor.mask.await_count == (2 if operation == 'generate' else 1)
+    ai.redactor.mask.assert_awaited_once()
+    ai.redactor.mask_markdown.assert_awaited_once_with(document.text, filename='a.md')
     method.assert_not_awaited()
 
 

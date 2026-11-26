@@ -3,15 +3,11 @@ import base64
 import binascii
 import hashlib
 import json
-from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any
-from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
 import httpx
-from markitdown import MarkItDownException, StreamInfo
-from markitdown.converters import XlsxConverter
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, TextContent
@@ -21,6 +17,7 @@ from aadd.attachments import validate_archive
 from aadd.config import Settings
 from aadd.external import ServiceError, call_service
 from aadd.models import Candidate, Change, Snapshot
+from aadd.redactor import Redactor
 
 
 class SearchResponse(BaseModel):
@@ -50,19 +47,19 @@ def decode_workbook(content: str, max_bytes: int) -> bytes:
     return workbook
 
 
-def workbook_markdown(workbook: bytes, settings: Settings) -> str:
+def check_workbook(workbook: bytes, settings: Settings) -> None:
     try:
         validate_archive(workbook, '.xlsx', settings)
-        with BytesIO(workbook) as stream:
-            return XlsxConverter().convert(stream, StreamInfo(extension='.xlsx')).markdown
-    except (BadZipFile, KeyError, MarkItDownException, ParseError, TypeError, ValueError) as error:
-        raise ServiceError('Excel 仕様書を Markdown に変換できませんでした。ファイル形式やサイズを確認してください。') from error
+    except (BadZipFile, ValueError) as error:
+        raise ServiceError('Excel 仕様書のファイル形式や展開後サイズを確認してください。') from error
 
 
 class KnowledgeBase:
-    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None, *,
+                 redactor: Redactor | None = None):
         self.settings = settings
         self.transport = transport
+        self.redactor = redactor if redactor is not None else Redactor(settings)
 
     async def call_tool(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         async def operation():
@@ -109,8 +106,11 @@ class KnowledgeBase:
         if not isinstance(content, str):
             raise ServiceError('仕様書の本文が不正です。')
         workbook = decode_workbook(content, self.settings.max_file_bytes)
-        text = await asyncio.to_thread(workbook_markdown, workbook, self.settings)
+        await asyncio.to_thread(check_workbook, workbook, self.settings)
+        filename = PurePosixPath(candidate.file_path.replace('\\', '/')).name
+        document = await self.redactor.convert_workbook(filename, workbook)
+        text = '\n\n'.join(document.chunks)
         if not text.strip() or len(text) > self.settings.max_document_chars:
             raise ServiceError('仕様書が空、または文字数上限超過です。')
         return Snapshot(document_id=candidate.document_id, file_path=candidate.file_path, text=text,
-                        sha256=hashlib.sha256(text.encode()).hexdigest())
+                        sha256=hashlib.sha256(text.encode()).hexdigest(), redactor_content_hash=document.content_hash)

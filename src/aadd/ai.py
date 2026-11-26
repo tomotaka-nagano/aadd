@@ -3,6 +3,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
+from pathlib import PurePosixPath
 import re
 import tomllib
 
@@ -63,7 +64,7 @@ QUESTION = (
 
 @dataclass
 class DocumentMasks:
-    results: dict[tuple[str, bool], MaskResult] = field(default_factory=dict)
+    results: dict[tuple[str, str | None, str], MaskResult] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -199,8 +200,7 @@ class AI:
                 message, instruction, mapping, references = await self.refinement_input(
                     data, instruction, evidence, client, schema_text)
             else:
-                message, instruction, mapping = await self.model_input(
-                    data, instruction, document, preserve_format=document is not None)
+                message, instruction, mapping = await self.model_input(data, instruction, document)
                 references = {}
             await self.budget(message + instruction + schema_text, client)
 
@@ -221,28 +221,29 @@ class AI:
         texts = [part.masked_text for part in masked.masked_parts]
         return encode_data(replace_strings(data, iter(texts[:-1]))), texts[-1], masked
 
-    async def mask_document(self, document: Snapshot, *, preserve_format: bool = False) -> MaskResult:
+    async def mask_document(self, document: Snapshot) -> MaskResult:
+        filename = PurePosixPath(document.file_path.replace('\\', '/')).with_suffix('.md').name
+
         async def mask():
-            if preserve_format:
-                return await self.redactor.mask([document.text])
-            return await self.redactor.mask_markdown(document.text)
+            if document.redactor_content_hash is not None:
+                return await self.redactor.mask_document_reference(document.redactor_content_hash)
+            return await self.redactor.mask_markdown(document.text, filename=filename)
 
         cache = document_masks.get()
         if cache is None:
             return await mask()
-        key = (document.sha256, preserve_format)
+        key = (document.sha256, document.redactor_content_hash, filename)
         async with cache.lock:
             if key not in cache.results:
                 cache.results[key] = await mask()
             return cache.results[key]
 
-    async def model_input(self, data: dict, instruction: str, document: Snapshot | None, *,
-                          preserve_format: bool = False):
+    async def model_input(self, data: dict, instruction: str, document: Snapshot | None):
         if document is None:
             message, instruction, masked = await self.mask_input(data, instruction)
             return message, instruction, masked.mapping
         context = await self.redactor.mask([*strings(data), instruction])
-        spec = await self.mask_document(document, preserve_format=preserve_format)
+        spec = await self.mask_document(document)
         context, spec = merge_masks([context, spec])
         texts = [part.masked_text for part in context.masked_parts]
         payload = replace_strings(data, iter(texts[:-1]))
